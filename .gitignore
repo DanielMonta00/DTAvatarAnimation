@@ -23,3 +23,8 @@
 # OS
 .DS_Store
 Thumbs.db
+
+UnityKeyLocal
+UnityKeyLocal.pub
+
+.gitignore
