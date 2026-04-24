@@ -102,12 +102,19 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
 
     Transform ResolveBone(bool isHumanoid, HumanBodyBones bone, string[] nameCandidates)
     {
-        if (isHumanoid)
+        // Prefer name-based lookup — works on both Generic and Humanoid rigs
+        // and doesn't throw when the Animator has no Avatar bound.
+        Transform t = FindBoneByName(avatar.transform, nameCandidates);
+        if (t != null) return t;
+
+        // Fallback: ask the Humanoid mapping when available (handles rigs
+        // with non-standard bone names but a valid humanoid Avatar asset).
+        if (isHumanoid && avatar.avatar != null)
         {
-            Transform t = avatar.GetBoneTransform(bone);
-            if (t != null) return t;
+            try { return avatar.GetBoneTransform(bone); }
+            catch (System.InvalidOperationException) { /* no avatar bound */ }
         }
-        return FindBoneByName(avatar.transform, nameCandidates);
+        return null;
     }
 
     static Transform FindBoneByName(Transform root, string[] candidates)
@@ -186,10 +193,9 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
         if (!acquired && recordKeypoints) BeginRecording();
         else if (acquired && !recordKeypoints) EndRecording();
 
-        // If the initial resolve happened before the Animator had bound its
-        // humanoid avatar, the bone transforms are null. Retry once the rig
-        // reports humanoid so subsequent frames have real keypoints.
-        if (acquired && !bonesResolved && avatar != null && avatar.isHuman)
+        // If the skeleton wasn't fully bound at begin time, keep retrying
+        // the name-based search until at least one bone resolves.
+        if (acquired && !bonesResolved && avatar != null)
         {
             ResolveKeypointTransforms();
             bonesResolved = HasAnyResolvedBone();
@@ -209,22 +215,12 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
     {
         if (avatar == null) { Debug.LogError("[KeypointsRecorder] Avatar Animator is not assigned."); recordKeypoints = false; return; }
 
-        // Animator.isHuman can transiently return false between OnEnable and
-        // the first Animator update (especially for prefab instances). We log
-        // a diagnostic and still acquire the session; ResolveKeypointTransforms
-        // will warn for each bone it can't find, and we'll retry the resolve
-        // lazily in Update if the rig binds later.
-        if (!avatar.isHuman)
-        {
-            string assetName = avatar.avatar != null ? avatar.avatar.name : "(none)";
-            bool assetHuman = avatar.avatar != null && avatar.avatar.isHuman;
-            Debug.LogWarning($"[KeypointsRecorder] Animator '{avatar.name}' reports isHuman=false at begin. " +
-                             $"Animator.avatar='{assetName}', avatar.isHuman={assetHuman}. " +
-                             "If the Animator's Avatar field is None or Generic, set it to a Humanoid avatar.");
-        }
-
         ResolveKeypointTransforms();
         bonesResolved = HasAnyResolvedBone();
+        if (!bonesResolved)
+            Debug.LogWarning($"[KeypointsRecorder] No bones resolved on Animator '{avatar.name}'. " +
+                             "Check that the avatar GameObject's skeleton has standard or Mixamo-style bone names " +
+                             "(e.g. LeftArm / RightArm / LeftUpLeg / Head / Neck).");
         session.Acquire();
         acquired = true;
     }
