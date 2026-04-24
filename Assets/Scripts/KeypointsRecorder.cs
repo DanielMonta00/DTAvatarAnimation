@@ -53,6 +53,8 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
 
     [Header("Recording")]
     public bool recordKeypoints = false;
+    [Tooltip("If enabled, write keyrgb/{t}.png with the keypoint overlay drawn on the captured image. Disable when you only need the JSON (e.g. for ViTPose comparison) and don't need the visualization.")]
+    public bool writeKeyrgbOverlay = true;
     [Tooltip("Max PNG encodes queued on background threads. Drops frames past this.")]
     public int maxInFlightEncodes = 4;
 
@@ -60,6 +62,8 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
     public int pointRadiusPx = 4;
     public int lineThicknessPx = 2;
     public bool drawSkeleton = true;
+    [Tooltip("Flip keypoint Y when drawing. If overlay appears upside-down vs the saved image, toggle this.")]
+    public bool flipKeypointY = false;
 
     static readonly Color32[] keypointColors =
     {
@@ -356,7 +360,11 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
             Vector3 sp = cam.WorldToScreenPoint(worldPos);
             depth = sp.z;
             float u = sp.x;
-            float v = (imgH - 1) - sp.y;
+            // Unity screen y is bottom-up; PNG rows are top-down. Normally we
+            // flip (h-1 - sp.y). URP rendering into targetTexture on DX can
+            // produce top-down bytes already, which makes the flip wrong —
+            // `flipKeypointY` toggles between the two.
+            float v = flipKeypointY ? sp.y : (imgH - 1) - sp.y;
             pixel = new Vector2(u, v);
             visible = sp.z > cam.nearClipPlane && u >= 0f && u < imgW && v >= 0f && v < imgH;
         }
@@ -366,8 +374,15 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
 
     public void OnSessionBegin(string sessionPath)
     {
-        keyrgbDir = Path.Combine(sessionPath, "keyrgb");
-        Directory.CreateDirectory(keyrgbDir);
+        if (writeKeyrgbOverlay)
+        {
+            keyrgbDir = Path.Combine(sessionPath, "keyrgb");
+            Directory.CreateDirectory(keyrgbDir);
+        }
+        else
+        {
+            keyrgbDir = null;
+        }
         jsonPath = Path.Combine(sessionPath, "keypoints_transforms.json");
         OpenJsonWriter();
         sessionReady = true;
@@ -428,6 +443,10 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
             if (found) pending.Remove(frameIndex);
         }
         if (!found) return;
+
+        // JSON-only mode: keypoints already written in OnFrameGather; skip the
+        // overlay draw + PNG encode so we don't pay for something not saved.
+        if (!writeKeyrgbOverlay) return;
 
         if (Interlocked.CompareExchange(ref _inFlight, 0, 0) >= maxInFlightEncodes) return;
 
@@ -538,14 +557,14 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
         int imgW, int imgH)
     {
         string rgbRel = $"rgb/{ts}.png";
-        string keyRel = $"keyrgb/{ts}.png";
 
         var sb = new StringBuilder(4096);
         sb.Append("  {");
         sb.Append("\n    \"frame_index\": ").Append(idx).Append(",");
         sb.Append("\n    \"timestamp\": ").Append(F(relTime)).Append(",");
         sb.Append("\n    \"rgb_path\": \"").Append(rgbRel).Append("\",");
-        sb.Append("\n    \"keyrgb_path\": \"").Append(keyRel).Append("\",");
+        if (writeKeyrgbOverlay)
+            sb.Append("\n    \"keyrgb_path\": \"").Append($"keyrgb/{ts}.png").Append("\",");
         sb.Append("\n    \"image_size\": [").Append(imgW).Append(",").Append(imgH).Append("],");
         sb.Append("\n    \"camera\": ").Append(BuildCameraJson(imgW, imgH)).Append(",");
         sb.Append("\n    \"keypoints\": [");
