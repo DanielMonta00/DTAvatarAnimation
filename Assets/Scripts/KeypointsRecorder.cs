@@ -1,23 +1,27 @@
 using UnityEngine;
-using UnityEngine.Rendering;
 using UnityEngine.Experimental.Rendering;
 using System;
-using System.Collections;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
-
-// Records a synchronised dataset of (RGB frame, RGB-with-keypoints overlay,
-// per-frame keypoint transforms) for evaluating human-pose-estimation models.
-// Mapping follows the 14-keypoint AI Challenger (AIC) layout used by ViTPose
-// (see ViTPose/configs/_base_/datasets/aic.py). AIC is used here instead of
-// COCO because its keypoints correspond 1:1 to Mecanim humanoid bones; only
-// head_top and neck need minor computation.
+// Writes keyrgb/{timestamp}.png (rgb with keypoint overlay) and
+// keypoints_transforms.json. The GPU readback and session folder are owned
+// by RecordingSession; this component only projects keypoints and draws/
+// encodes the overlay. When both this and RgbImageRecorder are
+// active, keyrgb/ pixels are bit-identical to rgb/ except for the drawn
+// overlay, because both subscribers consume the same RGB byte buffer.
+//
+// Keypoint layout: AIC 14 (see ViTPose/configs/_base_/datasets/aic.py).
+// 2D projection automatically switches between pinhole (regular Camera)
+// and equidistant fisheye/dome (when an Avante.FulldomeCamera is on the
+// same GameObject), so keypoint pixel coords always match the saved image.
 [RequireComponent(typeof(Camera))]
-public class KeypointsRecorder : MonoBehaviour
+[RequireComponent(typeof(RecordingSession))]
+public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscriber
 {
     public const int KP_COUNT = 14;
 
@@ -30,7 +34,6 @@ public class KeypointsRecorder : MonoBehaviour
         "head_top", "neck",
     };
 
-    // AIC skeleton edges (pairs of keypoint indices) used for overlay drawing.
     static readonly int[,] Skeleton =
     {
         {2,1},{1,0},{0,13},{13,3},{3,4},{4,5},
@@ -43,55 +46,20 @@ public class KeypointsRecorder : MonoBehaviour
     public Animator avatar;
 
     [Header("Head/Neck overrides (optional)")]
-    [Tooltip("If assigned, used as-is for the head_top keypoint (otherwise: Head bone + up offset).")]
     public Transform headTopOverride;
-    [Tooltip("If assigned, used as-is for the neck keypoint (otherwise: Neck bone, falling back to mid-shoulder).")]
     public Transform neckOverride;
-
-    [Header("Head heuristic")]
     [Tooltip("Distance in meters along Head bone's up axis from Head origin to the top of the skull.")]
     public float headTopUpOffset = 0.14f;
 
     [Header("Recording")]
-    public bool record = false;
-    public string outputFolder = "Recordings";
-    public string sessionName = "KeypointsSession";
+    public bool recordKeypoints = false;
     [Tooltip("Max PNG encodes queued on background threads. Drops frames past this.")]
     public int maxInFlightEncodes = 4;
-    [Tooltip("If true, this recorder owns Time.captureFramerate. Leave false when another recorder already sets it.")]
-    public bool setCaptureFramerate = false;
-    public int frameRate = 30;
 
     [Header("Overlay drawing")]
     public int pointRadiusPx = 4;
     public int lineThicknessPx = 2;
     public bool drawSkeleton = true;
-
-    [Header("Image orientation")]
-    [Tooltip("Flip rows before encoding PNGs. Default true matches standard top-down PNG convention on DX/Metal.")]
-    public bool flipOutputY = true;
-
-    Camera cam;
-    bool isRecording;
-    bool _capturing;
-    int _inFlight;
-    int frameIndex;
-    double recordingStartTime = -1.0;
-    string sessionPath;
-    RenderTexture rt;
-
-    StreamWriter jsonWriter;
-    readonly object jsonLock = new object();
-    bool jsonFirstFrame = true;
-
-    // Per-keypoint resolution.
-    enum KpMode { Bone, HeadTopOffset, MidShoulder }
-    readonly Transform[] keypointTransforms = new Transform[KP_COUNT];
-    readonly KpMode[] keypointModes = new KpMode[KP_COUNT];
-
-    // Cached refs used by the MidShoulder mode for 'neck'.
-    Transform leftShoulderBone;
-    Transform rightShoulderBone;
 
     static readonly Color32[] keypointColors =
     {
@@ -111,51 +79,83 @@ public class KeypointsRecorder : MonoBehaviour
         new Color32( 51,153,255,255), // 13 neck
     };
 
-    void Awake() { cam = GetComponent<Camera>(); }
-    void Start() { if (record) BeginRecording(); }
-    void OnApplicationQuit() { if (isRecording) EndRecording(); }
-    void OnDisable() { if (isRecording) EndRecording(); }
+    enum KpMode { Bone, HeadTopOffset, MidShoulder }
 
-    [ContextMenu("Start Recording")]
-    public void StartRecordingFromMenu() { record = true; BeginRecording(); }
-    [ContextMenu("Stop Recording")]
-    public void StopRecordingFromMenu() { EndRecording(); }
+    RecordingSession session;
+    Camera cam;
+    Avante.FulldomeCamera domeCam;
+    string keyrgbDir;
+    string jsonPath;
+    StreamWriter jsonWriter;
+    readonly object jsonLock = new object();
+    bool jsonFirstFrame = true;
+    bool acquired;
+    bool sessionReady;
+    int _inFlight;
+
+    readonly Transform[] keypointTransforms = new Transform[KP_COUNT];
+    readonly KpMode[] keypointModes = new KpMode[KP_COUNT];
+    Transform leftShoulderBone;
+    Transform rightShoulderBone;
+
+    // Per-frame snapshot populated in OnFrameGather and consumed in OnFrameDispatch.
+    // Keyed by frameIndex since multiple frames can be in flight simultaneously.
+    struct FrameSnapshot
+    {
+        public Vector2[] imagePos;
+        public bool[] visible;
+    }
+    readonly Dictionary<int, FrameSnapshot> pending = new Dictionary<int, FrameSnapshot>();
+    readonly object pendingLock = new object();
+
+    public bool WantsFrame => recordKeypoints && acquired;
+
+    void Awake()
+    {
+        session = GetComponent<RecordingSession>();
+        cam = GetComponent<Camera>();
+        domeCam = GetComponent<Avante.FulldomeCamera>();
+    }
+
+    void OnEnable()
+    {
+        session.Register(this);
+        if (recordKeypoints) BeginRecording();
+    }
+
+    void OnDisable()
+    {
+        if (acquired) EndRecording();
+        session.Unregister(this);
+    }
+
+    void Update()
+    {
+        if (!acquired && recordKeypoints) BeginRecording();
+        else if (acquired && !recordKeypoints) EndRecording();
+    }
 
     void BeginRecording()
     {
-        if (cam == null) cam = GetComponent<Camera>();
-        if (avatar == null) { Debug.LogError("[KeypointsRecorder] Avatar Animator is not assigned."); record = false; return; }
-        if (!avatar.isHuman) { Debug.LogError("[KeypointsRecorder] Avatar Animator must be humanoid."); record = false; return; }
+        if (avatar == null) { Debug.LogError("[KeypointsRecorder] Avatar Animator is not assigned."); recordKeypoints = false; return; }
+        if (!avatar.isHuman) { Debug.LogError("[KeypointsRecorder] Avatar Animator must be humanoid."); recordKeypoints = false; return; }
 
         ResolveKeypointTransforms();
-
-        sessionPath = Path.Combine(Application.dataPath, "..", outputFolder,
-            sessionName + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss"));
-        Directory.CreateDirectory(sessionPath);
-        Directory.CreateDirectory(Path.Combine(sessionPath, "rgb"));
-        Directory.CreateDirectory(Path.Combine(sessionPath, "keyrgb"));
-
-        EnsureRT(Mathf.Max(16, cam.pixelWidth), Mathf.Max(16, cam.pixelHeight));
-        if (setCaptureFramerate) Time.captureFramerate = frameRate;
-
-        OpenJsonWriter();
-
-        frameIndex = 0;
-        recordingStartTime = -1.0;
-        jsonFirstFrame = true;
-        isRecording = true;
-
-        Debug.Log($"[KeypointsRecorder] Recording started at {sessionPath}");
+        session.Acquire();
+        acquired = true;
     }
 
     void EndRecording()
     {
-        if (!isRecording) return;
-        isRecording = false;
-        CloseJsonWriter();
-        if (rt != null) { rt.Release(); Destroy(rt); rt = null; }
-        Debug.Log($"[KeypointsRecorder] Recording stopped at {sessionPath} ({frameIndex} frames).");
+        if (!acquired) return;
+        acquired = false;
+        session.Release();
     }
+
+    [ContextMenu("Start Recording")]
+    public void StartRecordingFromMenu() { recordKeypoints = true; BeginRecording(); }
+    [ContextMenu("Stop Recording")]
+    public void StopRecordingFromMenu() { recordKeypoints = false; EndRecording(); }
 
     void ResolveKeypointTransforms()
     {
@@ -177,41 +177,19 @@ public class KeypointsRecorder : MonoBehaviour
         keypointTransforms[10] = avatar.GetBoneTransform(HumanBodyBones.LeftLowerLeg);
         keypointTransforms[11] = avatar.GetBoneTransform(HumanBodyBones.LeftFoot);
 
-        // head_top: either an explicit override, or Head bone + up offset.
-        if (headTopOverride != null)
-        {
-            keypointTransforms[12] = headTopOverride;
-            keypointModes[12] = KpMode.Bone;
-        }
-        else
-        {
-            keypointTransforms[12] = head;
-            keypointModes[12] = KpMode.HeadTopOffset;
-        }
+        if (headTopOverride != null) { keypointTransforms[12] = headTopOverride; keypointModes[12] = KpMode.Bone; }
+        else                         { keypointTransforms[12] = head;             keypointModes[12] = KpMode.HeadTopOffset; }
 
-        // neck: override > Neck bone > mid-shoulder fallback.
-        if (neckOverride != null)
-        {
-            keypointTransforms[13] = neckOverride;
-            keypointModes[13] = KpMode.Bone;
-        }
-        else if (neck != null)
-        {
-            keypointTransforms[13] = neck;
-            keypointModes[13] = KpMode.Bone;
-        }
-        else
-        {
-            keypointTransforms[13] = null; // computed from L/R shoulders
-            keypointModes[13] = KpMode.MidShoulder;
-        }
+        if (neckOverride != null) { keypointTransforms[13] = neckOverride; keypointModes[13] = KpMode.Bone; }
+        else if (neck != null)    { keypointTransforms[13] = neck;         keypointModes[13] = KpMode.Bone; }
+        else                      { keypointTransforms[13] = null;         keypointModes[13] = KpMode.MidShoulder; }
 
         for (int i = 0; i < KP_COUNT; i++)
         {
             if (keypointModes[i] == KpMode.MidShoulder)
             {
                 if (leftShoulderBone == null || rightShoulderBone == null)
-                    Debug.LogWarning("[KeypointsRecorder] Cannot resolve 'neck' via mid-shoulder: shoulder bones missing.");
+                    Debug.LogWarning("[KeypointsRecorder] Cannot compute 'neck' via mid-shoulder: shoulder bones missing.");
             }
             else if (keypointTransforms[i] == null)
             {
@@ -246,154 +224,172 @@ public class KeypointsRecorder : MonoBehaviour
     {
         Transform t = keypointTransforms[i];
         if (t != null) return t.rotation;
-        // MidShoulder: inherit rotation from the mid-shoulder frame is ambiguous;
-        // fall back to the avatar root so downstream code always has a valid quat.
         return avatar != null ? avatar.transform.rotation : Quaternion.identity;
     }
 
-    void EnsureRT(int w, int h)
-    {
-        if (rt != null && rt.width == w && rt.height == h) return;
-        if (rt != null) { rt.Release(); Destroy(rt); }
-        rt = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32);
-        rt.Create();
-    }
+    // --- Projection ---
 
-    void Update()
+    // Project world position to image pixel coords (top-left origin) and
+    // report camera-space depth + visibility. Uses the dome equidistant
+    // projection when FulldomeCamera is present, else a standard pinhole
+    // via Camera.WorldToScreenPoint.
+    void ProjectToImage(Vector3 worldPos, int imgW, int imgH,
+                        out Vector2 pixel, out float depth, out bool visible)
     {
-        if (!isRecording && record) BeginRecording();
-        else if (isRecording && !record) EndRecording();
-        if (isRecording && !_capturing) StartCoroutine(CaptureCoroutine());
-    }
-
-    IEnumerator CaptureCoroutine()
-    {
-        _capturing = true;
-        yield return new WaitForEndOfFrame();
-        try
+        if (domeCam != null)
         {
-            if (!isRecording) yield break;
+            Vector3 d = worldPos - cam.transform.position;
+            depth = d.magnitude;
+            if (depth <= 1e-6f) { pixel = Vector2.zero; visible = false; return; }
 
-            int w = Mathf.Max(16, cam.pixelWidth);
-            int h = Mathf.Max(16, cam.pixelHeight);
-            EnsureRT(w, h);
+            Vector3 dUnit = d / depth;
+            Vector3 dCamLocal = Quaternion.Inverse(cam.transform.rotation) * dUnit;
 
-            if (Interlocked.CompareExchange(ref _inFlight, 0, 0) >= maxInFlightEncodes) yield break;
+            // Invert the shader's cameraRot = cam * R_x(-π/2)[fulldome] * R_x(domeTilt).
+            Vector3 dDome = dCamLocal;
+            if (domeCam.orientation == Avante.Orientation.Fulldome)
+                dDome = Quaternion.Euler(90f, 0f, 0f) * dDome;         // inverse of R_x(-π/2)
+            if (domeCam.domeTilt != 0f)
+                dDome = Quaternion.Euler(-domeCam.domeTilt, 0f, 0f) * dDome;
 
-            if (recordingStartTime < 0.0) recordingStartTime = Time.realtimeSinceStartup;
-            double relTime = Time.realtimeSinceStartup - recordingStartTime;
-            int idx = frameIndex++;
-            string ts = relTime.ToString("F6", CultureInfo.InvariantCulture);
-            string rgbRel = $"rgb/{ts}.png";
-            string keyRel = $"keyrgb/{ts}.png";
-            string rgbPath = Path.Combine(sessionPath, rgbRel);
-            string keyPath = Path.Combine(sessionPath, keyRel);
+            // Dome-local: zenith = +Z, phi from +Z, theta in xy-plane.
+            float horiz = Mathf.Sqrt(dDome.x * dDome.x + dDome.y * dDome.y);
+            float phi = Mathf.Atan2(horiz, dDome.z);
+            float theta = Mathf.Atan2(dDome.y, dDome.x);
+            float horizonRad = domeCam.horizon * Mathf.Deg2Rad;
+            float r = phi / (horizonRad * 0.5f);
 
-            Vector3[] worldPos = new Vector3[KP_COUNT];
-            Quaternion[] worldRot = new Quaternion[KP_COUNT];
-            Vector3[] localPos = new Vector3[KP_COUNT];
-            Vector2[] imagePos = new Vector2[KP_COUNT];
-            float[] imageDepth = new float[KP_COUNT];
-            bool[] visible = new bool[KP_COUNT];
+            float uSt = r * Mathf.Cos(theta);   // [-1, 1] when r <= 1
+            float vSt = r * Mathf.Sin(theta);
+            float uTex = (uSt + 1f) * 0.5f;     // [0, 1]
+            float vTex = (vSt + 1f) * 0.5f;
 
-            Transform root = avatar.transform;
-            for (int i = 0; i < KP_COUNT; i++)
-            {
-                Vector3 wp = GetKeypointWorldPosition(i);
-                worldPos[i] = wp;
-                worldRot[i] = GetKeypointWorldRotation(i);
-                localPos[i] = root.InverseTransformPoint(wp);
-
-                Vector3 sp = cam.WorldToScreenPoint(wp);
-                imageDepth[i] = sp.z;
-                // Unity screen-space has origin at bottom-left; image convention is top-left.
-                float u = sp.x;
-                float v = (h - 1) - sp.y;
-                imagePos[i] = new Vector2(u, v);
-                visible[i] = sp.z > cam.nearClipPlane && u >= 0f && u < w && v >= 0f && v < h;
-            }
-
-            Vector3 camPos = cam.transform.position;
-            Quaternion camRot = cam.transform.rotation;
-            float vFovRad = cam.fieldOfView * Mathf.Deg2Rad;
-            float fy = 0.5f * h / Mathf.Tan(vFovRad * 0.5f);
-            float fx = fy; // square pixels: hFov derived from vFov*aspect gives fx == fy
-            float cx = w * 0.5f;
-            float cy = h * 0.5f;
-            Matrix4x4 proj = cam.projectionMatrix;
-            Matrix4x4 worldToCam = cam.worldToCameraMatrix;
-
-            string frameJson = BuildFrameJson(idx, relTime, rgbRel, keyRel,
-                worldPos, worldRot, localPos, imagePos, imageDepth, visible,
-                camPos, camRot, fx, fy, cx, cy, cam.nearClipPlane, cam.farClipPlane,
-                worldToCam, proj);
-            lock (jsonLock)
-            {
-                if (jsonWriter != null)
-                {
-                    if (!jsonFirstFrame) jsonWriter.Write(",\n");
-                    jsonWriter.Write(frameJson);
-                    jsonFirstFrame = false;
-                }
-            }
-
-            // Render camera into our RT (without leaving the camera bound to it).
-            var prevTarget = cam.targetTexture;
-            cam.targetTexture = rt;
-            cam.Render();
-            cam.targetTexture = prevTarget;
-
-            Interlocked.Increment(ref _inFlight);
-
-            bool flipY = flipOutputY;
-            int pointR = pointRadiusPx;
-            int lineT = lineThicknessPx;
-            bool drawSkel = drawSkeleton;
-
-            AsyncGPUReadback.Request(rt, 0, TextureFormat.RGB24, req =>
-            {
-                try
-                {
-                    if (req.hasError) { Interlocked.Decrement(ref _inFlight); return; }
-                    var data = req.GetData<byte>().ToArray();
-                    Task.Run(() =>
-                    {
-                        try
-                        {
-                            byte[] buf = flipY ? FlipRowsRGB24(data, w, h) : data;
-
-                            byte[] rgbPng = ImageConversion.EncodeArrayToPNG(
-                                buf, GraphicsFormat.R8G8B8_UNorm, (uint)w, (uint)h);
-                            File.WriteAllBytes(rgbPath, rgbPng);
-
-                            // Keypoint image-space uses top-left origin (v = h-1-sp.y),
-                            // so we always draw on a top-down buffer. If we did not flip
-                            // above, flip here for drawing then encode.
-                            byte[] drawBuf = flipY ? (byte[])buf.Clone() : FlipRowsRGB24(buf, w, h);
-                            DrawOverlay(drawBuf, w, h, imagePos, visible, pointR, lineT, drawSkel);
-                            if (!flipY) drawBuf = FlipRowsRGB24(drawBuf, w, h);
-                            byte[] keyPng = ImageConversion.EncodeArrayToPNG(
-                                drawBuf, GraphicsFormat.R8G8B8_UNorm, (uint)w, (uint)h);
-                            File.WriteAllBytes(keyPath, keyPng);
-                        }
-                        catch (Exception e) { Debug.LogError("[KeypointsRecorder] " + e); }
-                        finally { Interlocked.Decrement(ref _inFlight); }
-                    });
-                }
-                catch { Interlocked.Decrement(ref _inFlight); }
-            });
+            float px = uTex * imgW;
+            float py = (1f - vTex) * imgH;      // top-left origin
+            pixel = new Vector2(px, py);
+            visible = r <= 1f && px >= 0f && px < imgW && py >= 0f && py < imgH;
         }
-        finally { _capturing = false; }
+        else
+        {
+            Vector3 sp = cam.WorldToScreenPoint(worldPos);
+            depth = sp.z;
+            float u = sp.x;
+            float v = (imgH - 1) - sp.y;
+            pixel = new Vector2(u, v);
+            visible = sp.z > cam.nearClipPlane && u >= 0f && u < imgW && v >= 0f && v < imgH;
+        }
     }
 
-    static byte[] FlipRowsRGB24(byte[] src, int w, int h)
+    // --- IFrameSubscriber ---
+
+    public void OnSessionBegin(string sessionPath)
     {
-        int stride = w * 3;
-        byte[] dst = new byte[src.Length];
-        for (int y = 0; y < h; y++)
-            Buffer.BlockCopy(src, (h - 1 - y) * stride, dst, y * stride, stride);
-        return dst;
+        keyrgbDir = Path.Combine(sessionPath, "keyrgb");
+        Directory.CreateDirectory(keyrgbDir);
+        jsonPath = Path.Combine(sessionPath, "keypoints_transforms.json");
+        OpenJsonWriter();
+        sessionReady = true;
     }
+
+    public void OnFrameGather(int frameIndex, double timestamp, string timestampString, int width, int height)
+    {
+        if (!sessionReady) return;
+
+        int imgW = width;
+        int imgH = height;
+
+        Vector3[] worldPos = new Vector3[KP_COUNT];
+        Quaternion[] worldRot = new Quaternion[KP_COUNT];
+        Vector3[] localPos = new Vector3[KP_COUNT];
+        Vector2[] imagePos = new Vector2[KP_COUNT];
+        float[] imageDepth = new float[KP_COUNT];
+        bool[] visible = new bool[KP_COUNT];
+
+        Transform root = avatar.transform;
+        for (int i = 0; i < KP_COUNT; i++)
+        {
+            Vector3 wp = GetKeypointWorldPosition(i);
+            worldPos[i] = wp;
+            worldRot[i] = GetKeypointWorldRotation(i);
+            localPos[i] = root.InverseTransformPoint(wp);
+            ProjectToImage(wp, imgW, imgH, out imagePos[i], out imageDepth[i], out visible[i]);
+        }
+
+        string frameJson = BuildFrameJson(frameIndex, timestamp, timestampString,
+            worldPos, worldRot, localPos, imagePos, imageDepth, visible, imgW, imgH);
+        lock (jsonLock)
+        {
+            if (jsonWriter != null)
+            {
+                if (!jsonFirstFrame) jsonWriter.Write(",\n");
+                jsonWriter.Write(frameJson);
+                jsonFirstFrame = false;
+            }
+        }
+
+        lock (pendingLock)
+        {
+            pending[frameIndex] = new FrameSnapshot { imagePos = imagePos, visible = visible };
+        }
+    }
+
+    public void OnFrameDispatch(int frameIndex, double timestamp, string timestampString,
+                                byte[] rgbTopDown, int width, int height)
+    {
+        if (!sessionReady) return;
+
+        FrameSnapshot snap;
+        bool found;
+        lock (pendingLock)
+        {
+            found = pending.TryGetValue(frameIndex, out snap);
+            if (found) pending.Remove(frameIndex);
+        }
+        if (!found) return;
+
+        if (Interlocked.CompareExchange(ref _inFlight, 0, 0) >= maxInFlightEncodes) return;
+
+        string path = Path.Combine(keyrgbDir, timestampString + ".png");
+        int w = width, h = height;
+        int pointR = pointRadiusPx;
+        int lineT = lineThicknessPx;
+        bool drawSkel = drawSkeleton;
+
+        // We must NOT mutate the shared byte buffer — clone before drawing.
+        byte[] buf = (byte[])rgbTopDown.Clone();
+        Vector2[] pts = snap.imagePos;
+        bool[] vis = snap.visible;
+
+        Interlocked.Increment(ref _inFlight);
+        Task.Run(() =>
+        {
+            try
+            {
+                DrawOverlay(buf, w, h, pts, vis, pointR, lineT, drawSkel);
+                var png = ImageConversion.EncodeArrayToPNG(
+                    buf, GraphicsFormat.R8G8B8_UNorm, (uint)w, (uint)h);
+                File.WriteAllBytes(path, png);
+            }
+            catch (Exception e) { Debug.LogError("[KeypointsRecorder] " + e); }
+            finally { Interlocked.Decrement(ref _inFlight); }
+        });
+    }
+
+    public void OnSessionEnd()
+    {
+        // Drain encodes.
+        int waited = 0;
+        while (Interlocked.CompareExchange(ref _inFlight, 0, 0) > 0 && waited < 5000)
+        {
+            Thread.Sleep(20);
+            waited += 20;
+        }
+        lock (pendingLock) { pending.Clear(); }
+        CloseJsonWriter();
+        sessionReady = false;
+    }
+
+    // --- Overlay ---
 
     static void DrawOverlay(byte[] buf, int w, int h, Vector2[] pts, bool[] vis,
                             int pointR, int lineT, bool drawSkel)
@@ -453,28 +449,23 @@ public class KeypointsRecorder : MonoBehaviour
         }
     }
 
-    string BuildFrameJson(int idx, double relTime, string rgbRel, string keyRel,
+    // --- JSON ---
+
+    string BuildFrameJson(int idx, double relTime, string ts,
         Vector3[] wp, Quaternion[] wr, Vector3[] lp, Vector2[] ip, float[] iz, bool[] vis,
-        Vector3 camPos, Quaternion camRot, float fx, float fy, float cx, float cy,
-        float near, float far, Matrix4x4 worldToCam, Matrix4x4 proj)
+        int imgW, int imgH)
     {
+        string rgbRel = $"rgb/{ts}.png";
+        string keyRel = $"keyrgb/{ts}.png";
+
         var sb = new StringBuilder(4096);
         sb.Append("  {");
         sb.Append("\n    \"frame_index\": ").Append(idx).Append(",");
         sb.Append("\n    \"timestamp\": ").Append(F(relTime)).Append(",");
         sb.Append("\n    \"rgb_path\": \"").Append(rgbRel).Append("\",");
         sb.Append("\n    \"keyrgb_path\": \"").Append(keyRel).Append("\",");
-        sb.Append("\n    \"camera\": { \"position\": ").Append(V3(camPos))
-          .Append(", \"rotation_quat\": ").Append(Q(camRot))
-          .Append(", \"fx\": ").Append(F(fx))
-          .Append(", \"fy\": ").Append(F(fy))
-          .Append(", \"cx\": ").Append(F(cx))
-          .Append(", \"cy\": ").Append(F(cy))
-          .Append(", \"near\": ").Append(F(near))
-          .Append(", \"far\": ").Append(F(far))
-          .Append(", \"world_to_camera\": ").Append(M4(worldToCam))
-          .Append(", \"projection\": ").Append(M4(proj))
-          .Append(" },");
+        sb.Append("\n    \"image_size\": [").Append(imgW).Append(",").Append(imgH).Append("],");
+        sb.Append("\n    \"camera\": ").Append(BuildCameraJson(imgW, imgH)).Append(",");
         sb.Append("\n    \"keypoints\": [");
         for (int i = 0; i < KP_COUNT; i++)
         {
@@ -491,6 +482,41 @@ public class KeypointsRecorder : MonoBehaviour
         }
         sb.Append("\n    ]");
         sb.Append("\n  }");
+        return sb.ToString();
+    }
+
+    string BuildCameraJson(int imgW, int imgH)
+    {
+        Vector3 p = cam.transform.position;
+        Quaternion q = cam.transform.rotation;
+        var sb = new StringBuilder(512);
+        sb.Append("{ \"position\": ").Append(V3(p))
+          .Append(", \"rotation_quat\": ").Append(Q(q));
+        if (domeCam != null)
+        {
+            sb.Append(", \"model\": \"fisheye_equidistant\"")
+              .Append(", \"horizon_deg\": ").Append(F(domeCam.horizon))
+              .Append(", \"is_fulldome\": ").Append(domeCam.orientation == Avante.Orientation.Fulldome ? "true" : "false")
+              .Append(", \"dome_tilt_deg\": ").Append(F(domeCam.domeTilt));
+        }
+        else
+        {
+            float vFovRad = cam.fieldOfView * Mathf.Deg2Rad;
+            float fy = 0.5f * imgH / Mathf.Tan(vFovRad * 0.5f);
+            float fx = fy;
+            float cx = imgW * 0.5f;
+            float cy = imgH * 0.5f;
+            sb.Append(", \"model\": \"pinhole\"")
+              .Append(", \"fx\": ").Append(F(fx))
+              .Append(", \"fy\": ").Append(F(fy))
+              .Append(", \"cx\": ").Append(F(cx))
+              .Append(", \"cy\": ").Append(F(cy))
+              .Append(", \"near\": ").Append(F(cam.nearClipPlane))
+              .Append(", \"far\": ").Append(F(cam.farClipPlane))
+              .Append(", \"world_to_camera\": ").Append(M4(cam.worldToCameraMatrix))
+              .Append(", \"projection\": ").Append(M4(cam.projectionMatrix));
+        }
+        sb.Append(" }");
         return sb.ToString();
     }
 
@@ -519,17 +545,12 @@ public class KeypointsRecorder : MonoBehaviour
 
     void OpenJsonWriter()
     {
-        string path = Path.Combine(sessionPath, "keypoints_transforms.json");
-        jsonWriter = new StreamWriter(path, false, new UTF8Encoding(false));
+        jsonWriter = new StreamWriter(jsonPath, false, new UTF8Encoding(false));
         jsonWriter.NewLine = "\n";
+        jsonFirstFrame = true;
 
         jsonWriter.Write("{\n");
         jsonWriter.Write("  \"dataset\": \"aic\",\n");
-        jsonWriter.Write("  \"image_size\": { \"width\": ");
-        jsonWriter.Write(cam.pixelWidth.ToString(CultureInfo.InvariantCulture));
-        jsonWriter.Write(", \"height\": ");
-        jsonWriter.Write(cam.pixelHeight.ToString(CultureInfo.InvariantCulture));
-        jsonWriter.Write(" },\n");
         jsonWriter.Write("  \"coordinate_convention\": { \"image_origin\": \"top_left\", \"unity_screen_origin\": \"bottom_left\", \"world\": \"unity_left_handed_y_up\" },\n");
         jsonWriter.Write("  \"keypoint_names\": [");
         for (int i = 0; i < AicKeypointNames.Length; i++)
@@ -555,13 +576,6 @@ public class KeypointsRecorder : MonoBehaviour
 
     void CloseJsonWriter()
     {
-        // Drain background writers so the last few JSON entries aren't truncated.
-        int waitMs = 0;
-        while (Interlocked.CompareExchange(ref _inFlight, 0, 0) > 0 && waitMs < 5000)
-        {
-            Thread.Sleep(20);
-            waitMs += 20;
-        }
         lock (jsonLock)
         {
             if (jsonWriter == null) return;
