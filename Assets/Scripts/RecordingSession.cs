@@ -66,8 +66,8 @@ public class RecordingSession : MonoBehaviour
     Camera cam;
     Avante.FulldomeCamera domeCam;
     RenderTexture fallbackRT;        // used when no dome fbo is available
-    RenderTexture prevCamTargetTex;  // camera's original targetTexture (restored on Release)
-    bool camRetargeted;              // true while we own cam.targetTexture
+    Camera captureCam;               // shadow camera rendering the scene into fallbackRT
+    GameObject captureCamGO;         // owns captureCam; destroyed on Release
 
     readonly List<IFrameSubscriber> subs = new List<IFrameSubscriber>();
     int refCount = 0;
@@ -82,6 +82,30 @@ public class RecordingSession : MonoBehaviour
         cam = GetComponent<Camera>();
         domeCam = GetComponent<Avante.FulldomeCamera>();
         EnsureDomemasterFbo();
+    }
+
+    void SetupCaptureCamera()
+    {
+        if (captureCamGO != null || cam == null) return;
+        captureCamGO = new GameObject("_RecordingSession_CaptureCam");
+        captureCamGO.hideFlags = HideFlags.HideAndDontSave;
+        captureCamGO.transform.SetParent(cam.transform, false);
+        captureCam = captureCamGO.AddComponent<Camera>();
+        captureCam.CopyFrom(cam);
+        captureCam.targetTexture = fallbackRT;
+        // Render just after the main camera so it sees the same state.
+        captureCam.depth = cam.depth + 100f;
+        // Don't also render to a display (we only want the RT output).
+        captureCam.targetDisplay = cam.targetDisplay;
+    }
+
+    void TeardownCaptureCamera()
+    {
+        if (captureCamGO == null) return;
+        if (Application.isPlaying) Destroy(captureCamGO);
+        else DestroyImmediate(captureCamGO);
+        captureCamGO = null;
+        captureCam = null;
     }
 
     // When a FulldomeCamera is present the dome pipeline needs an
@@ -118,7 +142,7 @@ public class RecordingSession : MonoBehaviour
 
     // Returns the current capture RT (for preview UI) when recording a regular
     // camera. Null for dome cameras or when not recording.
-    public RenderTexture GetPreviewTexture() => camRetargeted ? fallbackRT : null;
+    public RenderTexture GetPreviewTexture() => captureCam != null ? fallbackRT : null;
 
     public void Acquire()
     {
@@ -139,10 +163,11 @@ public class RecordingSession : MonoBehaviour
             lastCapturedUnityFrame = -1;
             if (setCaptureFramerate) Time.captureFramerate = frameRate;
 
-            // On non-dome cameras, bind the camera's target to our RT so
-            // URP/HDRP renders into it on each frame. This avoids calling
-            // cam.Render() from WaitForEndOfFrame — which stalls URP's
-            // simulation loop (observed as the scene freezing on frame 0).
+            // On non-dome cameras, spawn a shadow Camera that mirrors the main
+            // camera's pose + settings and renders the scene into fallbackRT.
+            // The main camera is left alone so Display 1 still shows the scene
+            // normally. Calling cam.Render() directly from a coroutine stalls
+            // URP, so a dedicated Camera is the clean route.
             if (domeCam == null && cam != null)
             {
                 int w = Mathf.Max(16, cam.pixelWidth);
@@ -153,9 +178,7 @@ public class RecordingSession : MonoBehaviour
                     fallbackRT = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32);
                     fallbackRT.Create();
                 }
-                prevCamTargetTex = cam.targetTexture;
-                cam.targetTexture = fallbackRT;
-                camRetargeted = true;
+                SetupCaptureCamera();
             }
 
             for (int i = 0; i < subs.Count; i++) subs[i].OnSessionBegin(sessionPath);
@@ -184,12 +207,7 @@ public class RecordingSession : MonoBehaviour
             catch (Exception e) { Debug.LogError("[RecordingSession] OnSessionEnd: " + e); }
         }
 
-        if (camRetargeted && cam != null)
-        {
-            cam.targetTexture = prevCamTargetTex;
-            camRetargeted = false;
-            prevCamTargetTex = null;
-        }
+        TeardownCaptureCamera();
         if (fallbackRT != null) { fallbackRT.Release(); Destroy(fallbackRT); fallbackRT = null; }
         if (setCaptureFramerate) Time.captureFramerate = 0;
         Debug.Log($"[RecordingSession] Session ended at {sessionPath}");
@@ -250,7 +268,7 @@ public class RecordingSession : MonoBehaviour
                           $"domeFboCreated={(domeCam != null && domeCam.domemasterFbo != null && domeCam.domemasterFbo.IsCreated())}, " +
                           $"fallbackRT={(fallbackRT != null)}, " +
                           $"fallbackCreated={(fallbackRT != null && fallbackRT.IsCreated())}, " +
-                          $"camRetargeted={camRetargeted}, " +
+                          $"captureCam={(captureCam != null)}, " +
                           $"cam={(cam != null ? cam.name : "null")}");
                 yield break;
             }
