@@ -81,6 +81,58 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
 
     enum KpMode { Bone, HeadTopOffset, MidShoulder }
 
+    // Candidate bone names used as a fallback when the rig is Generic (not
+    // Humanoid) — GetBoneTransform returns null in that case. We search the
+    // avatar's transform hierarchy for these names; namespace-prefixed names
+    // (e.g. "mixamorig1:LeftArm") also match via suffix check.
+    static readonly string[] BoneNames_LeftUpperArm  = { "LeftArm",      "LeftUpperArm",  "L_UpperArm"  };
+    static readonly string[] BoneNames_RightUpperArm = { "RightArm",     "RightUpperArm", "R_UpperArm"  };
+    static readonly string[] BoneNames_LeftLowerArm  = { "LeftForeArm",  "LeftLowerArm",  "L_ForeArm"   };
+    static readonly string[] BoneNames_RightLowerArm = { "RightForeArm", "RightLowerArm", "R_ForeArm"   };
+    static readonly string[] BoneNames_LeftHand      = { "LeftHand",     "L_Hand"                       };
+    static readonly string[] BoneNames_RightHand     = { "RightHand",    "R_Hand"                       };
+    static readonly string[] BoneNames_LeftUpperLeg  = { "LeftUpLeg",    "LeftUpperLeg",  "L_UpperLeg", "LeftThigh" };
+    static readonly string[] BoneNames_RightUpperLeg = { "RightUpLeg",   "RightUpperLeg", "R_UpperLeg", "RightThigh" };
+    static readonly string[] BoneNames_LeftLowerLeg  = { "LeftLeg",      "LeftLowerLeg",  "L_LowerLeg", "LeftCalf"  };
+    static readonly string[] BoneNames_RightLowerLeg = { "RightLeg",     "RightLowerLeg", "R_LowerLeg", "RightCalf" };
+    static readonly string[] BoneNames_LeftFoot      = { "LeftFoot",     "L_Foot"                       };
+    static readonly string[] BoneNames_RightFoot     = { "RightFoot",    "R_Foot"                       };
+    static readonly string[] BoneNames_Head          = { "Head"                                         };
+    static readonly string[] BoneNames_Neck          = { "Neck"                                         };
+
+    Transform ResolveBone(bool isHumanoid, HumanBodyBones bone, string[] nameCandidates)
+    {
+        if (isHumanoid)
+        {
+            Transform t = avatar.GetBoneTransform(bone);
+            if (t != null) return t;
+        }
+        return FindBoneByName(avatar.transform, nameCandidates);
+    }
+
+    static Transform FindBoneByName(Transform root, string[] candidates)
+    {
+        for (int i = 0; i < candidates.Length; i++)
+        {
+            Transform found = FindBoneRecursive(root, candidates[i]);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    static Transform FindBoneRecursive(Transform node, string name)
+    {
+        // Exact match, or namespace-prefixed match (e.g. "mixamorig1:LeftArm").
+        if (node.name == name || (node.name.Length > name.Length && node.name.EndsWith(":" + name)))
+            return node;
+        for (int i = 0; i < node.childCount; i++)
+        {
+            Transform result = FindBoneRecursive(node.GetChild(i), name);
+            if (result != null) return result;
+        }
+        return null;
+    }
+
     RecordingSession session;
     Camera cam;
     Avante.FulldomeCamera domeCam;
@@ -191,23 +243,25 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
 
     void ResolveKeypointTransforms()
     {
-        leftShoulderBone  = avatar.GetBoneTransform(HumanBodyBones.LeftUpperArm);
-        rightShoulderBone = avatar.GetBoneTransform(HumanBodyBones.RightUpperArm);
-        Transform head = avatar.GetBoneTransform(HumanBodyBones.Head);
-        Transform neck = avatar.GetBoneTransform(HumanBodyBones.Neck);
+        bool isHumanoid = avatar.isHuman;
+
+        leftShoulderBone  = ResolveBone(isHumanoid, HumanBodyBones.LeftUpperArm,  BoneNames_LeftUpperArm);
+        rightShoulderBone = ResolveBone(isHumanoid, HumanBodyBones.RightUpperArm, BoneNames_RightUpperArm);
+        Transform head    = ResolveBone(isHumanoid, HumanBodyBones.Head, BoneNames_Head);
+        Transform neck    = ResolveBone(isHumanoid, HumanBodyBones.Neck, BoneNames_Neck);
 
         keypointTransforms[0]  = rightShoulderBone;
-        keypointTransforms[1]  = avatar.GetBoneTransform(HumanBodyBones.RightLowerArm);
-        keypointTransforms[2]  = avatar.GetBoneTransform(HumanBodyBones.RightHand);
+        keypointTransforms[1]  = ResolveBone(isHumanoid, HumanBodyBones.RightLowerArm, BoneNames_RightLowerArm);
+        keypointTransforms[2]  = ResolveBone(isHumanoid, HumanBodyBones.RightHand,     BoneNames_RightHand);
         keypointTransforms[3]  = leftShoulderBone;
-        keypointTransforms[4]  = avatar.GetBoneTransform(HumanBodyBones.LeftLowerArm);
-        keypointTransforms[5]  = avatar.GetBoneTransform(HumanBodyBones.LeftHand);
-        keypointTransforms[6]  = avatar.GetBoneTransform(HumanBodyBones.RightUpperLeg);
-        keypointTransforms[7]  = avatar.GetBoneTransform(HumanBodyBones.RightLowerLeg);
-        keypointTransforms[8]  = avatar.GetBoneTransform(HumanBodyBones.RightFoot);
-        keypointTransforms[9]  = avatar.GetBoneTransform(HumanBodyBones.LeftUpperLeg);
-        keypointTransforms[10] = avatar.GetBoneTransform(HumanBodyBones.LeftLowerLeg);
-        keypointTransforms[11] = avatar.GetBoneTransform(HumanBodyBones.LeftFoot);
+        keypointTransforms[4]  = ResolveBone(isHumanoid, HumanBodyBones.LeftLowerArm,  BoneNames_LeftLowerArm);
+        keypointTransforms[5]  = ResolveBone(isHumanoid, HumanBodyBones.LeftHand,      BoneNames_LeftHand);
+        keypointTransforms[6]  = ResolveBone(isHumanoid, HumanBodyBones.RightUpperLeg, BoneNames_RightUpperLeg);
+        keypointTransforms[7]  = ResolveBone(isHumanoid, HumanBodyBones.RightLowerLeg, BoneNames_RightLowerLeg);
+        keypointTransforms[8]  = ResolveBone(isHumanoid, HumanBodyBones.RightFoot,     BoneNames_RightFoot);
+        keypointTransforms[9]  = ResolveBone(isHumanoid, HumanBodyBones.LeftUpperLeg,  BoneNames_LeftUpperLeg);
+        keypointTransforms[10] = ResolveBone(isHumanoid, HumanBodyBones.LeftLowerLeg,  BoneNames_LeftLowerLeg);
+        keypointTransforms[11] = ResolveBone(isHumanoid, HumanBodyBones.LeftFoot,      BoneNames_LeftFoot);
 
         if (headTopOverride != null) { keypointTransforms[12] = headTopOverride; keypointModes[12] = KpMode.Bone; }
         else                         { keypointTransforms[12] = head;             keypointModes[12] = KpMode.HeadTopOffset; }
