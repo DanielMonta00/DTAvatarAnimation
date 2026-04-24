@@ -65,7 +65,9 @@ public class RecordingSession : MonoBehaviour
 
     Camera cam;
     Avante.FulldomeCamera domeCam;
-    RenderTexture fallbackRT; // used when no dome fbo is available
+    RenderTexture fallbackRT;        // used when no dome fbo is available
+    RenderTexture prevCamTargetTex;  // camera's original targetTexture (restored on Release)
+    bool camRetargeted;              // true while we own cam.targetTexture
 
     readonly List<IFrameSubscriber> subs = new List<IFrameSubscriber>();
     int refCount = 0;
@@ -114,6 +116,10 @@ public class RecordingSession : MonoBehaviour
 
     public bool IsActive => refCount > 0;
 
+    // Returns the current capture RT (for preview UI) when recording a regular
+    // camera. Null for dome cameras or when not recording.
+    public RenderTexture GetPreviewTexture() => camRetargeted ? fallbackRT : null;
+
     public void Acquire()
     {
         if (refCount == 0)
@@ -125,6 +131,26 @@ public class RecordingSession : MonoBehaviour
             recordingStartTime = -1.0;
             lastCapturedUnityFrame = -1;
             if (setCaptureFramerate) Time.captureFramerate = frameRate;
+
+            // On non-dome cameras, bind the camera's target to our RT so
+            // URP/HDRP renders into it on each frame. This avoids calling
+            // cam.Render() from WaitForEndOfFrame — which stalls URP's
+            // simulation loop (observed as the scene freezing on frame 0).
+            if (domeCam == null && cam != null)
+            {
+                int w = Mathf.Max(16, cam.pixelWidth);
+                int h = Mathf.Max(16, cam.pixelHeight);
+                if (fallbackRT == null || fallbackRT.width != w || fallbackRT.height != h)
+                {
+                    if (fallbackRT != null) { fallbackRT.Release(); Destroy(fallbackRT); }
+                    fallbackRT = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32);
+                    fallbackRT.Create();
+                }
+                prevCamTargetTex = cam.targetTexture;
+                cam.targetTexture = fallbackRT;
+                camRetargeted = true;
+            }
+
             for (int i = 0; i < subs.Count; i++) subs[i].OnSessionBegin(sessionPath);
             Debug.Log($"[RecordingSession] Session started at {sessionPath}");
         }
@@ -151,6 +177,12 @@ public class RecordingSession : MonoBehaviour
             catch (Exception e) { Debug.LogError("[RecordingSession] OnSessionEnd: " + e); }
         }
 
+        if (camRetargeted && cam != null)
+        {
+            cam.targetTexture = prevCamTargetTex;
+            camRetargeted = false;
+            prevCamTargetTex = null;
+        }
         if (fallbackRT != null) { fallbackRT.Release(); Destroy(fallbackRT); fallbackRT = null; }
         if (setCaptureFramerate) Time.captureFramerate = 0;
         Debug.Log($"[RecordingSession] Session ended at {sessionPath}");
@@ -196,21 +228,12 @@ public class RecordingSession : MonoBehaviour
                 src = domeCam.domemasterFbo;
                 w = src.width; h = src.height;
             }
-            else if (cam != null)
+            else if (fallbackRT != null && fallbackRT.IsCreated())
             {
-                w = Mathf.Max(16, cam.pixelWidth);
-                h = Mathf.Max(16, cam.pixelHeight);
-                if (fallbackRT == null || fallbackRT.width != w || fallbackRT.height != h)
-                {
-                    if (fallbackRT != null) { fallbackRT.Release(); Destroy(fallbackRT); }
-                    fallbackRT = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32);
-                    fallbackRT.Create();
-                }
-                var prevTarget = cam.targetTexture;
-                cam.targetTexture = fallbackRT;
-                cam.Render();
-                cam.targetTexture = prevTarget;
+                // URP/HDRP has already rendered this frame into fallbackRT
+                // because we own cam.targetTexture for the whole session.
                 src = fallbackRT;
+                w = fallbackRT.width; h = fallbackRT.height;
             }
             else yield break;
 

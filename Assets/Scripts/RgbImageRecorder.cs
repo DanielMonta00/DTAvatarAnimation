@@ -24,8 +24,8 @@ public class RgbImageRecorder : MonoBehaviour, RecordingSession.IFrameSubscriber
     [Tooltip("Max PNG encodes queued on background threads. Drops frames past this.")]
     public int maxInFlightEncodes = 4;
 
-    [Header("Preview (fulldome only)")]
-    [Tooltip("Draw the dome image over the screen. No effect on non-fulldome cameras.")]
+    [Header("Preview")]
+    [Tooltip("Draw the captured frame over the screen while recording. Useful because URP/HDRP blanks the Game view when RecordingSession binds the Camera's targetTexture for a regular camera.")]
     public bool showPreview = true;
 
     RecordingSession session;
@@ -122,8 +122,10 @@ public class RgbImageRecorder : MonoBehaviour, RecordingSession.IFrameSubscriber
     void OnGUI()
     {
         if (!showPreview) return;
-        if (domeCam == null || domeCam.domemasterFbo == null) return;
-        GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), domeCam.domemasterFbo,
-                        ScaleMode.ScaleToFit, false);
+        Texture tex = null;
+        if (domeCam != null && domeCam.domemasterFbo != null) tex = domeCam.domemasterFbo;
+        else if (session != null && session.isActiveAndEnabled) tex = session.GetPreviewTexture();
+        if (tex == null) return;
+        GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), tex, ScaleMode.ScaleToFit, false);
     }
 }
