@@ -122,6 +122,13 @@ public class RecordingSession : MonoBehaviour
 
     public void Acquire()
     {
+        // Subscribers may Acquire from their OnEnable, which can fire before
+        // our own Awake in some script-execution-order configurations. Resolve
+        // lazily so we don't rely on Awake having populated these fields.
+        if (cam == null) cam = GetComponent<Camera>();
+        if (domeCam == null) domeCam = GetComponent<Avante.FulldomeCamera>();
+        EnsureDomemasterFbo();
+
         if (refCount == 0)
         {
             sessionPath = Path.Combine(Application.dataPath, "..", outputFolder,
@@ -235,7 +242,18 @@ public class RecordingSession : MonoBehaviour
                 src = fallbackRT;
                 w = fallbackRT.width; h = fallbackRT.height;
             }
-            else yield break;
+            else
+            {
+                Debug.Log($"[RecordingSession] No capture source. " +
+                          $"domeCam={(domeCam != null)}, " +
+                          $"domeFbo={(domeCam != null && domeCam.domemasterFbo != null)}, " +
+                          $"domeFboCreated={(domeCam != null && domeCam.domemasterFbo != null && domeCam.domemasterFbo.IsCreated())}, " +
+                          $"fallbackRT={(fallbackRT != null)}, " +
+                          $"fallbackCreated={(fallbackRT != null && fallbackRT.IsCreated())}, " +
+                          $"camRetargeted={camRetargeted}, " +
+                          $"cam={(cam != null ? cam.name : "null")}");
+                yield break;
+            }
 
             if (recordingStartTime < 0.0) recordingStartTime = Time.realtimeSinceStartup;
             int idx = frameCounter++;
