@@ -11,50 +11,45 @@ using System.Threading.Tasks;
 
 // Records a synchronised dataset of (RGB frame, RGB-with-keypoints overlay,
 // per-frame keypoint transforms) for evaluating human-pose-estimation models.
-// Mapping follows the 17-keypoint COCO layout used by ViTPose
-// (see ViTPose/configs/_base_/datasets/coco.py). Attach to the Camera that
-// should render the subject and assign the avatar Animator.
+// Mapping follows the 14-keypoint AI Challenger (AIC) layout used by ViTPose
+// (see ViTPose/configs/_base_/datasets/aic.py). AIC is used here instead of
+// COCO because its keypoints correspond 1:1 to Mecanim humanoid bones; only
+// head_top and neck need minor computation.
 [RequireComponent(typeof(Camera))]
 public class KeypointsRecorder : MonoBehaviour
 {
-    public static readonly string[] CocoKeypointNames =
+    public const int KP_COUNT = 14;
+
+    public static readonly string[] AicKeypointNames =
     {
-        "nose", "left_eye", "right_eye", "left_ear", "right_ear",
-        "left_shoulder", "right_shoulder",
-        "left_elbow", "right_elbow",
-        "left_wrist", "right_wrist",
-        "left_hip", "right_hip",
-        "left_knee", "right_knee",
-        "left_ankle", "right_ankle",
+        "right_shoulder", "right_elbow", "right_wrist",
+        "left_shoulder",  "left_elbow",  "left_wrist",
+        "right_hip", "right_knee", "right_ankle",
+        "left_hip",  "left_knee",  "left_ankle",
+        "head_top", "neck",
     };
 
-    // COCO skeleton edges (pairs of keypoint indices) used for overlay drawing.
+    // AIC skeleton edges (pairs of keypoint indices) used for overlay drawing.
     static readonly int[,] Skeleton =
     {
-        {0,1},{0,2},{1,3},{2,4},
-        {5,6},{5,7},{7,9},{6,8},{8,10},
-        {5,11},{6,12},{11,12},
-        {11,13},{13,15},{12,14},{14,16}
+        {2,1},{1,0},{0,13},{13,3},{3,4},{4,5},
+        {8,7},{7,6},{6,9},{9,10},{10,11},
+        {12,13},{0,6},{3,9}
     };
 
     [Header("Subject")]
     [Tooltip("Humanoid Animator of the avatar whose keypoints are exported.")]
     public Animator avatar;
 
-    [Header("Face keypoint overrides (optional)")]
-    [Tooltip("Assign to override the head-based heuristic for that keypoint.")]
-    public Transform noseOverride;
-    public Transform leftEyeOverride;
-    public Transform rightEyeOverride;
-    public Transform leftEarOverride;
-    public Transform rightEarOverride;
+    [Header("Head/Neck overrides (optional)")]
+    [Tooltip("If assigned, used as-is for the head_top keypoint (otherwise: Head bone + up offset).")]
+    public Transform headTopOverride;
+    [Tooltip("If assigned, used as-is for the neck keypoint (otherwise: Neck bone, falling back to mid-shoulder).")]
+    public Transform neckOverride;
 
-    [Header("Head heuristic offsets (meters, used when overrides are null)")]
-    public float noseForwardOffset = 0.11f;
-    public float eyeForwardOffset = 0.08f;
-    public float eyeSideOffset = 0.035f;
-    public float earSideOffset = 0.085f;
-    public float earUpOffset = 0.0f;
+    [Header("Head heuristic")]
+    [Tooltip("Distance in meters along Head bone's up axis from Head origin to the top of the skull.")]
+    public float headTopUpOffset = 0.14f;
 
     [Header("Recording")]
     public bool record = false;
@@ -88,30 +83,31 @@ public class KeypointsRecorder : MonoBehaviour
     readonly object jsonLock = new object();
     bool jsonFirstFrame = true;
 
-    readonly Transform[] keypointTransforms = new Transform[17];
-    // When true, the transform at that slot is the Head bone and we compute
-    // the keypoint from a local offset rather than reading Head.position directly.
-    readonly bool[] useHeadOffset = new bool[17];
+    // Per-keypoint resolution.
+    enum KpMode { Bone, HeadTopOffset, MidShoulder }
+    readonly Transform[] keypointTransforms = new Transform[KP_COUNT];
+    readonly KpMode[] keypointModes = new KpMode[KP_COUNT];
+
+    // Cached refs used by the MidShoulder mode for 'neck'.
+    Transform leftShoulderBone;
+    Transform rightShoulderBone;
 
     static readonly Color32[] keypointColors =
     {
-        new Color32( 51,153,255,255), // nose
-        new Color32( 51,153,255,255), // l eye
-        new Color32( 51,153,255,255), // r eye
-        new Color32( 51,153,255,255), // l ear
-        new Color32( 51,153,255,255), // r ear
-        new Color32(  0,255,  0,255), // l shoulder
-        new Color32(255,128,  0,255), // r shoulder
-        new Color32(  0,255,  0,255), // l elbow
-        new Color32(255,128,  0,255), // r elbow
-        new Color32(  0,255,  0,255), // l wrist
-        new Color32(255,128,  0,255), // r wrist
-        new Color32(  0,255,  0,255), // l hip
-        new Color32(255,128,  0,255), // r hip
-        new Color32(  0,255,  0,255), // l knee
-        new Color32(255,128,  0,255), // r knee
-        new Color32(  0,255,  0,255), // l ankle
-        new Color32(255,128,  0,255), // r ankle
+        new Color32(255,128,  0,255), // 0  right_shoulder
+        new Color32(255,128,  0,255), // 1  right_elbow
+        new Color32(255,128,  0,255), // 2  right_wrist
+        new Color32(  0,255,  0,255), // 3  left_shoulder
+        new Color32(  0,255,  0,255), // 4  left_elbow
+        new Color32(  0,255,  0,255), // 5  left_wrist
+        new Color32(255,128,  0,255), // 6  right_hip
+        new Color32(255,128,  0,255), // 7  right_knee
+        new Color32(255,128,  0,255), // 8  right_ankle
+        new Color32(  0,255,  0,255), // 9  left_hip
+        new Color32(  0,255,  0,255), // 10 left_knee
+        new Color32(  0,255,  0,255), // 11 left_ankle
+        new Color32( 51,153,255,255), // 12 head_top
+        new Color32( 51,153,255,255), // 13 neck
     };
 
     void Awake() { cam = GetComponent<Camera>(); }
@@ -162,67 +158,96 @@ public class KeypointsRecorder : MonoBehaviour
 
     void ResolveKeypointTransforms()
     {
+        leftShoulderBone  = avatar.GetBoneTransform(HumanBodyBones.LeftUpperArm);
+        rightShoulderBone = avatar.GetBoneTransform(HumanBodyBones.RightUpperArm);
         Transform head = avatar.GetBoneTransform(HumanBodyBones.Head);
-        Transform lEye = avatar.GetBoneTransform(HumanBodyBones.LeftEye);
-        Transform rEye = avatar.GetBoneTransform(HumanBodyBones.RightEye);
+        Transform neck = avatar.GetBoneTransform(HumanBodyBones.Neck);
 
-        // Face keypoints: prefer explicit override, then dedicated bone (eyes only),
-        // then fall back to the Head bone with a positional offset.
-        keypointTransforms[0] = noseOverride != null ? noseOverride : head;
-        useHeadOffset[0] = (noseOverride == null);
+        keypointTransforms[0]  = rightShoulderBone;
+        keypointTransforms[1]  = avatar.GetBoneTransform(HumanBodyBones.RightLowerArm);
+        keypointTransforms[2]  = avatar.GetBoneTransform(HumanBodyBones.RightHand);
+        keypointTransforms[3]  = leftShoulderBone;
+        keypointTransforms[4]  = avatar.GetBoneTransform(HumanBodyBones.LeftLowerArm);
+        keypointTransforms[5]  = avatar.GetBoneTransform(HumanBodyBones.LeftHand);
+        keypointTransforms[6]  = avatar.GetBoneTransform(HumanBodyBones.RightUpperLeg);
+        keypointTransforms[7]  = avatar.GetBoneTransform(HumanBodyBones.RightLowerLeg);
+        keypointTransforms[8]  = avatar.GetBoneTransform(HumanBodyBones.RightFoot);
+        keypointTransforms[9]  = avatar.GetBoneTransform(HumanBodyBones.LeftUpperLeg);
+        keypointTransforms[10] = avatar.GetBoneTransform(HumanBodyBones.LeftLowerLeg);
+        keypointTransforms[11] = avatar.GetBoneTransform(HumanBodyBones.LeftFoot);
 
-        keypointTransforms[1] = leftEyeOverride != null ? leftEyeOverride : (lEye != null ? lEye : head);
-        useHeadOffset[1] = (leftEyeOverride == null && lEye == null);
+        // head_top: either an explicit override, or Head bone + up offset.
+        if (headTopOverride != null)
+        {
+            keypointTransforms[12] = headTopOverride;
+            keypointModes[12] = KpMode.Bone;
+        }
+        else
+        {
+            keypointTransforms[12] = head;
+            keypointModes[12] = KpMode.HeadTopOffset;
+        }
 
-        keypointTransforms[2] = rightEyeOverride != null ? rightEyeOverride : (rEye != null ? rEye : head);
-        useHeadOffset[2] = (rightEyeOverride == null && rEye == null);
+        // neck: override > Neck bone > mid-shoulder fallback.
+        if (neckOverride != null)
+        {
+            keypointTransforms[13] = neckOverride;
+            keypointModes[13] = KpMode.Bone;
+        }
+        else if (neck != null)
+        {
+            keypointTransforms[13] = neck;
+            keypointModes[13] = KpMode.Bone;
+        }
+        else
+        {
+            keypointTransforms[13] = null; // computed from L/R shoulders
+            keypointModes[13] = KpMode.MidShoulder;
+        }
 
-        keypointTransforms[3] = leftEarOverride != null ? leftEarOverride : head;
-        useHeadOffset[3] = (leftEarOverride == null);
-
-        keypointTransforms[4] = rightEarOverride != null ? rightEarOverride : head;
-        useHeadOffset[4] = (rightEarOverride == null);
-
-        keypointTransforms[5]  = avatar.GetBoneTransform(HumanBodyBones.LeftUpperArm);
-        keypointTransforms[6]  = avatar.GetBoneTransform(HumanBodyBones.RightUpperArm);
-        keypointTransforms[7]  = avatar.GetBoneTransform(HumanBodyBones.LeftLowerArm);
-        keypointTransforms[8]  = avatar.GetBoneTransform(HumanBodyBones.RightLowerArm);
-        keypointTransforms[9]  = avatar.GetBoneTransform(HumanBodyBones.LeftHand);
-        keypointTransforms[10] = avatar.GetBoneTransform(HumanBodyBones.RightHand);
-        keypointTransforms[11] = avatar.GetBoneTransform(HumanBodyBones.LeftUpperLeg);
-        keypointTransforms[12] = avatar.GetBoneTransform(HumanBodyBones.RightUpperLeg);
-        keypointTransforms[13] = avatar.GetBoneTransform(HumanBodyBones.LeftLowerLeg);
-        keypointTransforms[14] = avatar.GetBoneTransform(HumanBodyBones.RightLowerLeg);
-        keypointTransforms[15] = avatar.GetBoneTransform(HumanBodyBones.LeftFoot);
-        keypointTransforms[16] = avatar.GetBoneTransform(HumanBodyBones.RightFoot);
-
-        for (int i = 0; i < 17; i++)
-            if (keypointTransforms[i] == null)
-                Debug.LogWarning($"[KeypointsRecorder] No transform resolved for '{CocoKeypointNames[i]}'.");
+        for (int i = 0; i < KP_COUNT; i++)
+        {
+            if (keypointModes[i] == KpMode.MidShoulder)
+            {
+                if (leftShoulderBone == null || rightShoulderBone == null)
+                    Debug.LogWarning("[KeypointsRecorder] Cannot resolve 'neck' via mid-shoulder: shoulder bones missing.");
+            }
+            else if (keypointTransforms[i] == null)
+            {
+                Debug.LogWarning($"[KeypointsRecorder] No transform resolved for '{AicKeypointNames[i]}'.");
+            }
+        }
     }
 
     Vector3 GetKeypointWorldPosition(int i)
     {
-        Transform t = keypointTransforms[i];
-        if (t == null) return Vector3.zero;
-        if (!useHeadOffset[i]) return t.position;
-
-        Vector3 fwd = t.forward, right = t.right, up = t.up;
-        switch (i)
+        switch (keypointModes[i])
         {
-            case 0: return t.position + fwd * noseForwardOffset;
-            case 1: return t.position + fwd * eyeForwardOffset + right * eyeSideOffset;
-            case 2: return t.position + fwd * eyeForwardOffset - right * eyeSideOffset;
-            case 3: return t.position + right * earSideOffset + up * earUpOffset;
-            case 4: return t.position - right * earSideOffset + up * earUpOffset;
-            default: return t.position;
+            case KpMode.HeadTopOffset:
+            {
+                Transform t = keypointTransforms[i];
+                return t != null ? t.position + t.up * headTopUpOffset : Vector3.zero;
+            }
+            case KpMode.MidShoulder:
+            {
+                if (leftShoulderBone == null || rightShoulderBone == null) return Vector3.zero;
+                return 0.5f * (leftShoulderBone.position + rightShoulderBone.position);
+            }
+            default:
+            {
+                Transform t = keypointTransforms[i];
+                return t != null ? t.position : Vector3.zero;
+            }
         }
     }
 
     Quaternion GetKeypointWorldRotation(int i)
     {
         Transform t = keypointTransforms[i];
-        return t != null ? t.rotation : Quaternion.identity;
+        if (t != null) return t.rotation;
+        // MidShoulder: inherit rotation from the mid-shoulder frame is ambiguous;
+        // fall back to the avatar root so downstream code always has a valid quat.
+        return avatar != null ? avatar.transform.rotation : Quaternion.identity;
     }
 
     void EnsureRT(int w, int h)
@@ -248,114 +273,114 @@ public class KeypointsRecorder : MonoBehaviour
         {
             if (!isRecording) yield break;
 
-        int w = Mathf.Max(16, cam.pixelWidth);
-        int h = Mathf.Max(16, cam.pixelHeight);
-        EnsureRT(w, h);
+            int w = Mathf.Max(16, cam.pixelWidth);
+            int h = Mathf.Max(16, cam.pixelHeight);
+            EnsureRT(w, h);
 
-        if (Interlocked.CompareExchange(ref _inFlight, 0, 0) >= maxInFlightEncodes) yield break;
+            if (Interlocked.CompareExchange(ref _inFlight, 0, 0) >= maxInFlightEncodes) yield break;
 
-        if (recordingStartTime < 0.0) recordingStartTime = Time.realtimeSinceStartup;
-        double relTime = Time.realtimeSinceStartup - recordingStartTime;
-        int idx = frameIndex++;
-        string ts = relTime.ToString("F6", CultureInfo.InvariantCulture);
-        string rgbRel = $"rgb/{ts}.png";
-        string keyRel = $"keyrgb/{ts}.png";
-        string rgbPath = Path.Combine(sessionPath, rgbRel);
-        string keyPath = Path.Combine(sessionPath, keyRel);
+            if (recordingStartTime < 0.0) recordingStartTime = Time.realtimeSinceStartup;
+            double relTime = Time.realtimeSinceStartup - recordingStartTime;
+            int idx = frameIndex++;
+            string ts = relTime.ToString("F6", CultureInfo.InvariantCulture);
+            string rgbRel = $"rgb/{ts}.png";
+            string keyRel = $"keyrgb/{ts}.png";
+            string rgbPath = Path.Combine(sessionPath, rgbRel);
+            string keyPath = Path.Combine(sessionPath, keyRel);
 
-        Vector3[] worldPos = new Vector3[17];
-        Quaternion[] worldRot = new Quaternion[17];
-        Vector3[] localPos = new Vector3[17];
-        Vector2[] imagePos = new Vector2[17];
-        float[] imageDepth = new float[17];
-        bool[] visible = new bool[17];
+            Vector3[] worldPos = new Vector3[KP_COUNT];
+            Quaternion[] worldRot = new Quaternion[KP_COUNT];
+            Vector3[] localPos = new Vector3[KP_COUNT];
+            Vector2[] imagePos = new Vector2[KP_COUNT];
+            float[] imageDepth = new float[KP_COUNT];
+            bool[] visible = new bool[KP_COUNT];
 
-        Transform root = avatar.transform;
-        for (int i = 0; i < 17; i++)
-        {
-            Vector3 wp = GetKeypointWorldPosition(i);
-            worldPos[i] = wp;
-            worldRot[i] = GetKeypointWorldRotation(i);
-            localPos[i] = root.InverseTransformPoint(wp);
-
-            Vector3 sp = cam.WorldToScreenPoint(wp);
-            imageDepth[i] = sp.z;
-            // Unity screen-space has origin at bottom-left; image convention is top-left.
-            float u = sp.x;
-            float v = (h - 1) - sp.y;
-            imagePos[i] = new Vector2(u, v);
-            visible[i] = sp.z > cam.nearClipPlane && u >= 0f && u < w && v >= 0f && v < h;
-        }
-
-        Vector3 camPos = cam.transform.position;
-        Quaternion camRot = cam.transform.rotation;
-        float vFovRad = cam.fieldOfView * Mathf.Deg2Rad;
-        float fy = 0.5f * h / Mathf.Tan(vFovRad * 0.5f);
-        float fx = fy; // square pixels: hFov derived from vFov*aspect gives fx == fy
-        float cx = w * 0.5f;
-        float cy = h * 0.5f;
-        Matrix4x4 proj = cam.projectionMatrix;
-        Matrix4x4 worldToCam = cam.worldToCameraMatrix;
-
-        string frameJson = BuildFrameJson(idx, relTime, rgbRel, keyRel,
-            worldPos, worldRot, localPos, imagePos, imageDepth, visible,
-            camPos, camRot, fx, fy, cx, cy, cam.nearClipPlane, cam.farClipPlane,
-            worldToCam, proj);
-        lock (jsonLock)
-        {
-            if (jsonWriter != null)
+            Transform root = avatar.transform;
+            for (int i = 0; i < KP_COUNT; i++)
             {
-                if (!jsonFirstFrame) jsonWriter.Write(",\n");
-                jsonWriter.Write(frameJson);
-                jsonFirstFrame = false;
+                Vector3 wp = GetKeypointWorldPosition(i);
+                worldPos[i] = wp;
+                worldRot[i] = GetKeypointWorldRotation(i);
+                localPos[i] = root.InverseTransformPoint(wp);
+
+                Vector3 sp = cam.WorldToScreenPoint(wp);
+                imageDepth[i] = sp.z;
+                // Unity screen-space has origin at bottom-left; image convention is top-left.
+                float u = sp.x;
+                float v = (h - 1) - sp.y;
+                imagePos[i] = new Vector2(u, v);
+                visible[i] = sp.z > cam.nearClipPlane && u >= 0f && u < w && v >= 0f && v < h;
             }
-        }
 
-        // Render camera into our RT (without leaving the camera bound to it).
-        var prevTarget = cam.targetTexture;
-        cam.targetTexture = rt;
-        cam.Render();
-        cam.targetTexture = prevTarget;
+            Vector3 camPos = cam.transform.position;
+            Quaternion camRot = cam.transform.rotation;
+            float vFovRad = cam.fieldOfView * Mathf.Deg2Rad;
+            float fy = 0.5f * h / Mathf.Tan(vFovRad * 0.5f);
+            float fx = fy; // square pixels: hFov derived from vFov*aspect gives fx == fy
+            float cx = w * 0.5f;
+            float cy = h * 0.5f;
+            Matrix4x4 proj = cam.projectionMatrix;
+            Matrix4x4 worldToCam = cam.worldToCameraMatrix;
 
-        Interlocked.Increment(ref _inFlight);
-
-        bool flipY = flipOutputY;
-        int pointR = pointRadiusPx;
-        int lineT = lineThicknessPx;
-        bool drawSkel = drawSkeleton;
-
-        AsyncGPUReadback.Request(rt, 0, TextureFormat.RGB24, req =>
-        {
-            try
+            string frameJson = BuildFrameJson(idx, relTime, rgbRel, keyRel,
+                worldPos, worldRot, localPos, imagePos, imageDepth, visible,
+                camPos, camRot, fx, fy, cx, cy, cam.nearClipPlane, cam.farClipPlane,
+                worldToCam, proj);
+            lock (jsonLock)
             {
-                if (req.hasError) { Interlocked.Decrement(ref _inFlight); return; }
-                var data = req.GetData<byte>().ToArray();
-                Task.Run(() =>
+                if (jsonWriter != null)
                 {
-                    try
-                    {
-                        byte[] buf = flipY ? FlipRowsRGB24(data, w, h) : data;
-
-                        byte[] rgbPng = ImageConversion.EncodeArrayToPNG(
-                            buf, GraphicsFormat.R8G8B8_UNorm, (uint)w, (uint)h);
-                        File.WriteAllBytes(rgbPath, rgbPng);
-
-                        // Keypoint image-space uses top-left origin (v = h-1-sp.y),
-                        // so we always draw on a top-down buffer. If we did not flip
-                        // above, flip here for drawing then encode.
-                        byte[] drawBuf = flipY ? (byte[])buf.Clone() : FlipRowsRGB24(buf, w, h);
-                        DrawOverlay(drawBuf, w, h, imagePos, visible, pointR, lineT, drawSkel);
-                        if (!flipY) drawBuf = FlipRowsRGB24(drawBuf, w, h);
-                        byte[] keyPng = ImageConversion.EncodeArrayToPNG(
-                            drawBuf, GraphicsFormat.R8G8B8_UNorm, (uint)w, (uint)h);
-                        File.WriteAllBytes(keyPath, keyPng);
-                    }
-                    catch (Exception e) { Debug.LogError("[KeypointsRecorder] " + e); }
-                    finally { Interlocked.Decrement(ref _inFlight); }
-                });
+                    if (!jsonFirstFrame) jsonWriter.Write(",\n");
+                    jsonWriter.Write(frameJson);
+                    jsonFirstFrame = false;
+                }
             }
-            catch { Interlocked.Decrement(ref _inFlight); }
-        });
+
+            // Render camera into our RT (without leaving the camera bound to it).
+            var prevTarget = cam.targetTexture;
+            cam.targetTexture = rt;
+            cam.Render();
+            cam.targetTexture = prevTarget;
+
+            Interlocked.Increment(ref _inFlight);
+
+            bool flipY = flipOutputY;
+            int pointR = pointRadiusPx;
+            int lineT = lineThicknessPx;
+            bool drawSkel = drawSkeleton;
+
+            AsyncGPUReadback.Request(rt, 0, TextureFormat.RGB24, req =>
+            {
+                try
+                {
+                    if (req.hasError) { Interlocked.Decrement(ref _inFlight); return; }
+                    var data = req.GetData<byte>().ToArray();
+                    Task.Run(() =>
+                    {
+                        try
+                        {
+                            byte[] buf = flipY ? FlipRowsRGB24(data, w, h) : data;
+
+                            byte[] rgbPng = ImageConversion.EncodeArrayToPNG(
+                                buf, GraphicsFormat.R8G8B8_UNorm, (uint)w, (uint)h);
+                            File.WriteAllBytes(rgbPath, rgbPng);
+
+                            // Keypoint image-space uses top-left origin (v = h-1-sp.y),
+                            // so we always draw on a top-down buffer. If we did not flip
+                            // above, flip here for drawing then encode.
+                            byte[] drawBuf = flipY ? (byte[])buf.Clone() : FlipRowsRGB24(buf, w, h);
+                            DrawOverlay(drawBuf, w, h, imagePos, visible, pointR, lineT, drawSkel);
+                            if (!flipY) drawBuf = FlipRowsRGB24(drawBuf, w, h);
+                            byte[] keyPng = ImageConversion.EncodeArrayToPNG(
+                                drawBuf, GraphicsFormat.R8G8B8_UNorm, (uint)w, (uint)h);
+                            File.WriteAllBytes(keyPath, keyPng);
+                        }
+                        catch (Exception e) { Debug.LogError("[KeypointsRecorder] " + e); }
+                        finally { Interlocked.Decrement(ref _inFlight); }
+                    });
+                }
+                catch { Interlocked.Decrement(ref _inFlight); }
+            });
         }
         finally { _capturing = false; }
     }
@@ -385,7 +410,7 @@ public class KeypointsRecorder : MonoBehaviour
                                     Mathf.RoundToInt(pts[b].x), Mathf.RoundToInt(pts[b].y), lineT, c);
             }
         }
-        for (int i = 0; i < 17; i++)
+        for (int i = 0; i < KP_COUNT; i++)
         {
             if (!vis[i]) continue;
             DrawFilledCircle(buf, w, h, Mathf.RoundToInt(pts[i].x), Mathf.RoundToInt(pts[i].y), pointR, keypointColors[i]);
@@ -450,11 +475,11 @@ public class KeypointsRecorder : MonoBehaviour
           .Append(", \"projection\": ").Append(M4(proj))
           .Append(" },");
         sb.Append("\n    \"keypoints\": [");
-        for (int i = 0; i < 17; i++)
+        for (int i = 0; i < KP_COUNT; i++)
         {
             sb.Append(i == 0 ? "\n      " : ",\n      ");
             sb.Append("{ \"id\": ").Append(i);
-            sb.Append(", \"name\": \"").Append(CocoKeypointNames[i]).Append("\"");
+            sb.Append(", \"name\": \"").Append(AicKeypointNames[i]).Append("\"");
             sb.Append(", \"world_position\": ").Append(V3(wp[i]));
             sb.Append(", \"world_rotation\": ").Append(Q(wr[i]));
             sb.Append(", \"local_position\": ").Append(V3(lp[i]));
@@ -498,7 +523,7 @@ public class KeypointsRecorder : MonoBehaviour
         jsonWriter.NewLine = "\n";
 
         jsonWriter.Write("{\n");
-        jsonWriter.Write("  \"dataset\": \"coco17\",\n");
+        jsonWriter.Write("  \"dataset\": \"aic\",\n");
         jsonWriter.Write("  \"image_size\": { \"width\": ");
         jsonWriter.Write(cam.pixelWidth.ToString(CultureInfo.InvariantCulture));
         jsonWriter.Write(", \"height\": ");
@@ -506,10 +531,10 @@ public class KeypointsRecorder : MonoBehaviour
         jsonWriter.Write(" },\n");
         jsonWriter.Write("  \"coordinate_convention\": { \"image_origin\": \"top_left\", \"unity_screen_origin\": \"bottom_left\", \"world\": \"unity_left_handed_y_up\" },\n");
         jsonWriter.Write("  \"keypoint_names\": [");
-        for (int i = 0; i < CocoKeypointNames.Length; i++)
+        for (int i = 0; i < AicKeypointNames.Length; i++)
         {
             if (i > 0) jsonWriter.Write(",");
-            jsonWriter.Write("\""); jsonWriter.Write(CocoKeypointNames[i]); jsonWriter.Write("\"");
+            jsonWriter.Write("\""); jsonWriter.Write(AicKeypointNames[i]); jsonWriter.Write("\"");
         }
         jsonWriter.Write("],\n");
         jsonWriter.Write("  \"skeleton\": [");
