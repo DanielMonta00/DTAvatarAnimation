@@ -133,14 +133,46 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
     {
         if (!acquired && recordKeypoints) BeginRecording();
         else if (acquired && !recordKeypoints) EndRecording();
+
+        // If the initial resolve happened before the Animator had bound its
+        // humanoid avatar, the bone transforms are null. Retry once the rig
+        // reports humanoid so subsequent frames have real keypoints.
+        if (acquired && !bonesResolved && avatar != null && avatar.isHuman)
+        {
+            ResolveKeypointTransforms();
+            bonesResolved = HasAnyResolvedBone();
+        }
+    }
+
+    bool bonesResolved;
+
+    bool HasAnyResolvedBone()
+    {
+        for (int i = 0; i < KP_COUNT; i++)
+            if (keypointTransforms[i] != null) return true;
+        return false;
     }
 
     void BeginRecording()
     {
         if (avatar == null) { Debug.LogError("[KeypointsRecorder] Avatar Animator is not assigned."); recordKeypoints = false; return; }
-        if (!avatar.isHuman) { Debug.LogError("[KeypointsRecorder] Avatar Animator must be humanoid."); recordKeypoints = false; return; }
+
+        // Animator.isHuman can transiently return false between OnEnable and
+        // the first Animator update (especially for prefab instances). We log
+        // a diagnostic and still acquire the session; ResolveKeypointTransforms
+        // will warn for each bone it can't find, and we'll retry the resolve
+        // lazily in Update if the rig binds later.
+        if (!avatar.isHuman)
+        {
+            string assetName = avatar.avatar != null ? avatar.avatar.name : "(none)";
+            bool assetHuman = avatar.avatar != null && avatar.avatar.isHuman;
+            Debug.LogWarning($"[KeypointsRecorder] Animator '{avatar.name}' reports isHuman=false at begin. " +
+                             $"Animator.avatar='{assetName}', avatar.isHuman={assetHuman}. " +
+                             "If the Animator's Avatar field is None or Generic, set it to a Humanoid avatar.");
+        }
 
         ResolveKeypointTransforms();
+        bonesResolved = HasAnyResolvedBone();
         session.Acquire();
         acquired = true;
     }
