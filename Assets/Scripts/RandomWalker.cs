@@ -27,6 +27,10 @@ public class RandomWalker : MonoBehaviour
     public LayerMask obstacleLayers = ~0;       // layers considered obstacles (default: everything)
     public float obstacleSphereRadius = 0.25f;  // radius for spherecast to detect thin/low colliders
     public bool includeTriggerColliders = true; // include trigger colliders in detection
+    [Tooltip("Number of directions probed when forward is blocked. Higher = smoother corner exits at small cost.")]
+    public int avoidanceProbeRays = 12;
+    [Tooltip("Multiplier on obstacleDetectDistance used for direction probing. Larger = picks emptier corridors.")]
+    public float avoidanceProbeRangeMul = 2.0f;
 
     [Header("Optional bounds (leave empty to disable)")]
     public Transform areaCenter;               // center of allowed area
@@ -94,35 +98,34 @@ public class RandomWalker : MonoBehaviour
         // Always move forward
         Vector3 forward = transform.forward;
 
-        // Obstacle avoidance: use spherecast + multiple rays to detect thin or trigger-only colliders
+        // Obstacle avoidance: detect blockage via spherecast + low/high rays.
+        // When blocked, probe the full circle to find the most open heading
+        // instead of using Vector3.Reflect — reflection oscillates in concave
+        // corners (wall A's reflection aims into wall B, which reflects back).
         bool avoided = false;
         RaycastHit hit;
-        Vector3 rayOrigin = transform.position + Vector3.up * 0.4f; // center height for spherecast
+        Vector3 rayOrigin = transform.position + Vector3.up * 0.4f;
         QueryTriggerInteraction qti = includeTriggerColliders ? QueryTriggerInteraction.Collide : QueryTriggerInteraction.Ignore;
 
-        // 1) spherecast forward to catch thin/low colliders
-        if (Physics.SphereCast(rayOrigin, obstacleSphereRadius, forward, out hit, obstacleDetectDistance, obstacleLayers, qti))
+        bool blocked = Physics.SphereCast(rayOrigin, obstacleSphereRadius, forward, out hit, obstacleDetectDistance, obstacleLayers, qti);
+        if (!blocked)
         {
-            Vector3 reflectDir = Vector3.Reflect(forward, hit.normal);
-            float angle = Mathf.Atan2(reflectDir.x, reflectDir.z) * Mathf.Rad2Deg;
-            targetRotation = Quaternion.Euler(0f, angle, 0f);
-            ScheduleNextChange();
-            avoided = true;
-        }
-        else
-        {
-            // 2) cast a lower ray to detect low obstacles and an upper ray to detect tall but thin objects
             Vector3 lowOrigin = transform.position + Vector3.up * 0.15f;
             Vector3 highOrigin = transform.position + Vector3.up * (cc != null ? Mathf.Min(cc.height * 0.9f, 1.6f) : 1.6f);
-            if (Physics.Raycast(lowOrigin, forward, out hit, obstacleDetectDistance, obstacleLayers, qti) ||
-                Physics.Raycast(highOrigin, forward, out hit, obstacleDetectDistance, obstacleLayers, qti))
-            {
-                Vector3 reflectDir = Vector3.Reflect(forward, hit.normal);
-                float angle = Mathf.Atan2(reflectDir.x, reflectDir.z) * Mathf.Rad2Deg;
-                targetRotation = Quaternion.Euler(0f, angle, 0f);
-                ScheduleNextChange();
-                avoided = true;
-            }
+            blocked = Physics.Raycast(lowOrigin, forward, out hit, obstacleDetectDistance, obstacleLayers, qti)
+                   || Physics.Raycast(highOrigin, forward, out hit, obstacleDetectDistance, obstacleLayers, qti);
+        }
+
+        if (blocked)
+        {
+            Vector3 escape;
+            if (FindClearestDirection(rayOrigin, forward, qti, out escape))
+                targetRotation = Quaternion.LookRotation(escape, Vector3.up);
+            else
+                // Fully surrounded — flip 180 as last resort.
+                targetRotation = Quaternion.Euler(0f, transform.eulerAngles.y + 180f, 0f);
+            ScheduleNextChange();
+            avoided = true;
         }
 
         // Area bounds: if areaCenter is set and agent is outside, turn back toward center
@@ -219,19 +222,70 @@ public class RandomWalker : MonoBehaviour
 
         if (stuckTimer >= stuckTimeToTurn)
         {
-            // try a small backward nudge first
+            // Small backward nudge to clear the contact, then probe for the
+            // most open direction (better than a blind 180 in concave corners).
             Vector3 backup = -transform.forward * backupDistance;
-            if (cc != null)
-                cc.Move(backup);
-            else
-                transform.position += backup;
+            if (cc != null) cc.Move(backup);
+            else            transform.position += backup;
 
-            // force a ~180 degree turn with jitter
-            float jitter = Random.Range(-25f, 25f);
-            targetRotation = Quaternion.Euler(0f, transform.eulerAngles.y + 180f + jitter, 0f);
+            Vector3 origin = transform.position + Vector3.up * 0.4f;
+            QueryTriggerInteraction stuckQti = includeTriggerColliders ? QueryTriggerInteraction.Collide : QueryTriggerInteraction.Ignore;
+            Vector3 escape;
+            if (FindClearestDirection(origin, transform.forward, stuckQti, out escape))
+            {
+                targetRotation = Quaternion.LookRotation(escape, Vector3.up);
+            }
+            else
+            {
+                float jitter = Random.Range(-25f, 25f);
+                targetRotation = Quaternion.Euler(0f, transform.eulerAngles.y + 180f + jitter, 0f);
+            }
             ScheduleNextChange();
             stuckTimer = 0f;
         }
+    }
+
+    // Probes `avoidanceProbeRays` headings around the avatar in the xz-plane
+    // and returns the world-space direction with the most clearance. This
+    // replaces Vector3.Reflect when blocked: reflection alone oscillates in
+    // concave corners, while picking the freest direction naturally exits.
+    bool FindClearestDirection(Vector3 origin, Vector3 currentForward, QueryTriggerInteraction qti, out Vector3 best)
+    {
+        int rays = Mathf.Max(4, avoidanceProbeRays);
+        float range = obstacleDetectDistance * Mathf.Max(1f, avoidanceProbeRangeMul);
+        float bestDist = -1f;
+        Vector3 bestDir = currentForward;
+
+        for (int i = 0; i < rays; i++)
+        {
+            float ang = (360f / rays) * i;
+            Vector3 dir = Quaternion.Euler(0f, ang, 0f) * Vector3.forward;
+
+            float dist;
+            RaycastHit hit;
+            if (Physics.SphereCast(origin, obstacleSphereRadius, dir, out hit, range, obstacleLayers, qti))
+                dist = hit.distance;
+            else
+                dist = range;
+
+            // Light bias toward keeping current heading: equally clear
+            // directions that require less turning are preferred. Up to 30%
+            // penalty for a full 180° about-face.
+            float headingDelta = Vector3.Angle(currentForward, dir); // 0..180
+            float bias = 1f - (headingDelta / 180f) * 0.3f;
+            float score = dist * bias;
+
+            if (score > bestDist)
+            {
+                bestDist = score;
+                bestDir = dir;
+            }
+        }
+
+        best = bestDir;
+        // Treat anything where the *best* direction is still mostly blocked
+        // (less than half a body-length clear) as "no escape found".
+        return bestDist > obstacleSphereRadius;
     }
 
     void OnDrawGizmos()
