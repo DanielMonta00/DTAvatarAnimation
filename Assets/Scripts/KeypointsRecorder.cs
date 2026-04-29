@@ -163,6 +163,11 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
     readonly object pendingLock = new object();
 
     public bool WantsFrame => recordKeypoints && acquired;
+    // Only the keyrgb PNG encode queue can back-pressure us. JSON-only mode
+    // (writeKeyrgbOverlay = false) never throttles.
+    public bool IsAtCapacity =>
+        writeKeyrgbOverlay &&
+        Interlocked.CompareExchange(ref _inFlight, 0, 0) >= maxInFlightEncodes;
 
     void Awake()
     {
