@@ -753,6 +753,9 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
                               out float xCenter, out float yCenter, out float w, out float h)
     {
         xCenter = yCenter = w = h = 0f;
+        // YOLO is always top-left origin. If image_position is stored in
+        // bottom-left (flipKeypointY=true), convert each y here so the
+        // exported normalized bbox matches what cv2/Ultralytics expect.
         float xmin = float.PositiveInfinity, ymin = float.PositiveInfinity;
         float xmax = float.NegativeInfinity, ymax = float.NegativeInfinity;
         int count = 0;
@@ -760,10 +763,11 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
         {
             if (!vis[i]) continue;
             count++;
+            float yTL = flipKeypointY ? (imgH - 1f - pts[i].y) : pts[i].y;
             if (pts[i].x < xmin) xmin = pts[i].x;
-            if (pts[i].y < ymin) ymin = pts[i].y;
+            if (yTL < ymin) ymin = yTL;
             if (pts[i].x > xmax) xmax = pts[i].x;
-            if (pts[i].y > ymax) ymax = pts[i].y;
+            if (yTL > ymax) ymax = yTL;
         }
         if (count < 2) return false;
 
