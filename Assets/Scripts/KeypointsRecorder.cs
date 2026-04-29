@@ -440,12 +440,21 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
         sb.Append("\n    \"camera\": ").Append(BuildCameraJson(width, height)).Append(",");
         sb.Append("\n    \"persons\": [");
 
-        // Pre-compute Unity world → OpenCV camera-space transform once per
+        // Pre-compute Unity world → OpenCV camera-space transforms once per
         // frame so every keypoint can be cheaply expressed in the convention
         // used by MeTRAbs / OpenCV / most pose-estimation libraries:
-        // X right, Y down, +Z forward. worldToCameraMatrix gives us GL
-        // camera space (X right, Y up, −Z forward); we flip Y and Z to match.
+        // X right, Y down, +Z forward (right-handed).
+        //
+        // For positions: worldToCameraMatrix gives GL camera space
+        // (X right, Y up, −Z forward); we flip Y and Z to match OpenCV.
+        //
+        // For rotations: build the rotation in Unity's left-handed camera
+        // frame (X right, Y up, +Z forward) via Inverse(cam.rotation) * Q,
+        // then flip the y component of the resulting quaternion to convert
+        // to OpenCV's right-handed Y-down basis. Equivalent to conjugating
+        // the rotation by the diag(1,-1,1) basis change.
         Matrix4x4 worldToCamGL = cam.worldToCameraMatrix;
+        Quaternion invCamRot   = Quaternion.Inverse(cam.transform.rotation);
 
         for (int p = 0; p < personCount; p++)
         {
@@ -454,6 +463,7 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
             var worldRot  = new Quaternion[KP_COUNT];
             var localPos  = new Vector3[KP_COUNT];
             var camPosCv  = new Vector3[KP_COUNT];
+            var camRotCv  = new Quaternion[KP_COUNT];
             var imagePos  = new Vector2[KP_COUNT];
             var imageDepth = new float[KP_COUNT];
             var visible    = new bool[KP_COUNT];
@@ -469,6 +479,9 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
                 Vector3 pCamGL = worldToCamGL.MultiplyPoint3x4(wp);
                 camPosCv[i] = new Vector3(pCamGL.x, -pCamGL.y, -pCamGL.z);
 
+                Quaternion qBoneCamLH = invCamRot * worldRot[i];
+                camRotCv[i] = new Quaternion(qBoneCamLH.x, -qBoneCamLH.y, qBoneCamLH.z, qBoneCamLH.w);
+
                 ProjectToImage(wp, width, height, out imagePos[i], out imageDepth[i], out visible[i]);
             }
 
@@ -482,10 +495,11 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
                 sb.Append(i == 0 ? "\n          " : ",\n          ");
                 sb.Append("{ \"id\": ").Append(i);
                 sb.Append(", \"name\": \"").Append(AicKeypointNames[i]).Append("\"");
-                sb.Append(", \"world_position\": ").Append(V3(worldPos[i]));
-                sb.Append(", \"world_rotation\": ").Append(Q(worldRot[i]));
-                sb.Append(", \"local_position\": ").Append(V3(localPos[i]));
-                sb.Append(", \"camera_position_opencv\": ").Append(V3(camPosCv[i]));
+                sb.Append(", \"position_in_world\": ").Append(V3(worldPos[i]));
+                sb.Append(", \"rotation_in_world\": ").Append(Q(worldRot[i]));
+                sb.Append(", \"position_in_local\": ").Append(V3(localPos[i]));
+                sb.Append(", \"position_in_camera_opencv\": ").Append(V3(camPosCv[i]));
+                sb.Append(", \"rotation_in_camera_opencv\": ").Append(Q(camRotCv[i]));
                 sb.Append(", \"image_position\": [").Append(F(imagePos[i].x)).Append(",").Append(F(imagePos[i].y)).Append("]");
                 sb.Append(", \"image_depth\": ").Append(F(imageDepth[i]));
                 sb.Append(", \"visible\": ").Append(visible[i] ? "true" : "false");
