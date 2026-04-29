@@ -49,6 +49,12 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
     public bool recordKeypoints = false;
     [Tooltip("If enabled, write keyrgb/{t}.png with the keypoint overlay drawn on the captured image. Disable when you only need the JSON.")]
     public bool writeKeyrgbOverlay = true;
+    [Tooltip("If enabled, write bboxes/{t}.txt with one YOLO-format line per avatar (class x_center y_center w h, all normalized).")]
+    public bool writeYoloBboxes = true;
+    [Tooltip("YOLO class id used for every avatar's person bbox. 0 matches the COCO 'person' class.")]
+    public int yoloClassId = 0;
+    [Tooltip("Fractional padding added on each side of the keypoint AABB before normalizing (0.1 = 10% margin).")]
+    public float bboxPaddingFraction = 0.1f;
     [Tooltip("Max PNG encodes queued on background threads. Drops frames past this.")]
     public int maxInFlightEncodes = 4;
 
@@ -145,7 +151,10 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
     Camera cam;
     Avante.FulldomeCamera domeCam;
     string keyrgbDir;
+    string bboxDir;
     string jsonPath;
+    string sessionRoot;
+    bool kJsonWritten;
     StreamWriter jsonWriter;
     readonly object jsonLock = new object();
     bool jsonFirstFrame = true;
@@ -162,6 +171,7 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
         public Vector2[][] imagePos;
         public bool[][]    visible;
         public string      frameJson;
+        public string      yoloText;
     }
     readonly Dictionary<int, FrameSnapshot> pending = new Dictionary<int, FrameSnapshot>();
     readonly object pendingLock = new object();
@@ -372,13 +382,21 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
 
     public void OnSessionBegin(string sessionPath)
     {
+        sessionRoot = sessionPath;
         if (writeKeyrgbOverlay)
         {
             keyrgbDir = Path.Combine(sessionPath, "keyrgb");
             Directory.CreateDirectory(keyrgbDir);
         }
         else { keyrgbDir = null; }
+        if (writeYoloBboxes)
+        {
+            bboxDir = Path.Combine(sessionPath, "bboxes");
+            Directory.CreateDirectory(bboxDir);
+        }
+        else { bboxDir = null; }
         jsonPath = Path.Combine(sessionPath, "keypoints_transforms.json");
+        kJsonWritten = false;
         OpenJsonWriter();
         sessionReady = true;
     }
@@ -387,9 +405,18 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
     {
         if (!sessionReady) return;
 
+        // Write K.json once we know the actual capture dimensions.
+        if (!kJsonWritten)
+        {
+            WriteKJson(width, height);
+            kJsonWritten = true;
+        }
+
         int personCount = rigs.Count;
         var allImagePos = new Vector2[personCount][];
         var allVisible  = new bool[personCount][];
+
+        var yolo = new StringBuilder(personCount * 64);
 
         var sb = new StringBuilder(4096 + personCount * 2048);
         sb.Append("  {");
@@ -445,12 +472,24 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
 
             allImagePos[p] = imagePos;
             allVisible[p]  = visible;
+
+            // YOLO line: AABB over visible keypoints, padded, normalized by image size.
+            if (writeYoloBboxes && TryComputePersonBbox(imagePos, visible, width, height,
+                                                       out float xc, out float yc, out float bw, out float bh))
+            {
+                yolo.Append(yoloClassId).Append(' ')
+                    .Append(F(xc)).Append(' ')
+                    .Append(F(yc)).Append(' ')
+                    .Append(F(bw)).Append(' ')
+                    .Append(F(bh)).Append('\n');
+            }
         }
 
         sb.Append("\n    ]");
         sb.Append("\n  }");
 
         string frameJson = sb.ToString();
+        string yoloText = yolo.Length > 0 ? yolo.ToString() : null;
 
         // Stash the JSON + per-person pixel coords; OnFrameDispatch writes
         // them only when the readback actually delivers bytes, so a frame
@@ -462,6 +501,7 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
                 imagePos = allImagePos,
                 visible  = allVisible,
                 frameJson = frameJson,
+                yoloText = yoloText,
             };
         }
     }
@@ -491,6 +531,12 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
                 jsonWriter.Write(snap.frameJson);
                 jsonFirstFrame = false;
             }
+        }
+
+        if (writeYoloBboxes && bboxDir != null)
+        {
+            string yoloPath = Path.Combine(bboxDir, ts + ".txt");
+            File.WriteAllText(yoloPath, snap.yoloText ?? string.Empty);
         }
 
         if (!writeKeyrgbOverlay) return;
@@ -595,6 +641,80 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
     }
 
     // --- JSON helpers ---
+
+    bool TryComputePersonBbox(Vector2[] pts, bool[] vis, int imgW, int imgH,
+                              out float xCenter, out float yCenter, out float w, out float h)
+    {
+        xCenter = yCenter = w = h = 0f;
+        float xmin = float.PositiveInfinity, ymin = float.PositiveInfinity;
+        float xmax = float.NegativeInfinity, ymax = float.NegativeInfinity;
+        int count = 0;
+        for (int i = 0; i < pts.Length; i++)
+        {
+            if (!vis[i]) continue;
+            count++;
+            if (pts[i].x < xmin) xmin = pts[i].x;
+            if (pts[i].y < ymin) ymin = pts[i].y;
+            if (pts[i].x > xmax) xmax = pts[i].x;
+            if (pts[i].y > ymax) ymax = pts[i].y;
+        }
+        if (count < 2) return false;
+
+        float padW = (xmax - xmin) * bboxPaddingFraction;
+        float padH = (ymax - ymin) * bboxPaddingFraction;
+        xmin = Mathf.Clamp(xmin - padW, 0f, imgW - 1f);
+        ymin = Mathf.Clamp(ymin - padH, 0f, imgH - 1f);
+        xmax = Mathf.Clamp(xmax + padW, 0f, imgW - 1f);
+        ymax = Mathf.Clamp(ymax + padH, 0f, imgH - 1f);
+
+        float bw = xmax - xmin;
+        float bh = ymax - ymin;
+        if (bw <= 0f || bh <= 0f) return false;
+
+        xCenter = (xmin + 0.5f * bw) / imgW;
+        yCenter = (ymin + 0.5f * bh) / imgH;
+        w = bw / imgW;
+        h = bh / imgH;
+        return true;
+    }
+
+    void WriteKJson(int imgW, int imgH)
+    {
+        if (string.IsNullOrEmpty(sessionRoot)) return;
+        string path = Path.Combine(sessionRoot, "K.json");
+        var sb = new StringBuilder(512);
+
+        if (domeCam != null)
+        {
+            sb.Append("{\n");
+            sb.Append("  \"model\": \"fisheye_equidistant\",\n");
+            sb.Append("  \"image_size\": [").Append(imgW).Append(", ").Append(imgH).Append("],\n");
+            sb.Append("  \"horizon_deg\": ").Append(F(domeCam.horizon)).Append(",\n");
+            sb.Append("  \"is_fulldome\": ").Append(domeCam.orientation == Avante.Orientation.Fulldome ? "true" : "false").Append(",\n");
+            sb.Append("  \"dome_tilt_deg\": ").Append(F(domeCam.domeTilt)).Append("\n");
+            sb.Append("}\n");
+        }
+        else
+        {
+            float vFovRad = cam.fieldOfView * Mathf.Deg2Rad;
+            float fy = 0.5f * imgH / Mathf.Tan(vFovRad * 0.5f);
+            float fx = fy;
+            float cx = imgW * 0.5f;
+            float cy = imgH * 0.5f;
+            sb.Append("{\n");
+            sb.Append("  \"model\": \"pinhole\",\n");
+            sb.Append("  \"image_size\": [").Append(imgW).Append(", ").Append(imgH).Append("],\n");
+            sb.Append("  \"fx\": ").Append(F(fx)).Append(",\n");
+            sb.Append("  \"fy\": ").Append(F(fy)).Append(",\n");
+            sb.Append("  \"cx\": ").Append(F(cx)).Append(",\n");
+            sb.Append("  \"cy\": ").Append(F(cy)).Append(",\n");
+            sb.Append("  \"K\": [[").Append(F(fx)).Append(", 0, ").Append(F(cx)).Append("],")
+                       .Append(" [0, ").Append(F(fy)).Append(", ").Append(F(cy)).Append("],")
+                       .Append(" [0, 0, 1]]\n");
+            sb.Append("}\n");
+        }
+        File.WriteAllText(path, sb.ToString());
+    }
 
     string BuildCameraJson(int imgW, int imgH)
     {
