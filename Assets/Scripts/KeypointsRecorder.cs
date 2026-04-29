@@ -55,6 +55,10 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
     public int yoloClassId = 0;
     [Tooltip("Fractional padding added on each side of the keypoint AABB before normalizing (0.1 = 10% margin).")]
     public float bboxPaddingFraction = 0.1f;
+    [Tooltip("Debug: write bbox_vis/{t}.png with the YOLO bboxes drawn over the captured image. Slows recording — enable only when verifying bbox quality.")]
+    public bool writeBboxVis = false;
+    [Tooltip("Color for the bbox rectangles in bbox_vis output.")]
+    public Color bboxVisColor = new Color(1f, 1f, 0f, 1f);
     [Tooltip("Max PNG encodes queued on background threads. Drops frames past this.")]
     public int maxInFlightEncodes = 4;
 
@@ -152,6 +156,7 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
     Avante.FulldomeCamera domeCam;
     string keyrgbDir;
     string bboxDir;
+    string bboxVisDir;
     string jsonPath;
     string sessionRoot;
     bool kJsonWritten;
@@ -177,10 +182,10 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
     readonly object pendingLock = new object();
 
     public bool WantsFrame => recordKeypoints && acquired;
-    // Only the keyrgb PNG encode queue can back-pressure us. JSON-only mode
-    // (writeKeyrgbOverlay = false) never throttles.
+    // Throttle when either of our PNG outputs (keyrgb or bbox_vis) is enabled
+    // and the encode queue is full. JSON-only mode never throttles.
     public bool IsAtCapacity =>
-        writeKeyrgbOverlay &&
+        (writeKeyrgbOverlay || writeBboxVis) &&
         Interlocked.CompareExchange(ref _inFlight, 0, 0) >= maxInFlightEncodes;
 
     void Awake()
@@ -395,6 +400,12 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
             Directory.CreateDirectory(bboxDir);
         }
         else { bboxDir = null; }
+        if (writeBboxVis)
+        {
+            bboxVisDir = Path.Combine(sessionPath, "bbox_vis");
+            Directory.CreateDirectory(bboxVisDir);
+        }
+        else { bboxVisDir = null; }
         jsonPath = Path.Combine(sessionPath, "keypoints_transforms.json");
         kJsonWritten = false;
         OpenJsonWriter();
@@ -539,17 +550,45 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
             File.WriteAllText(yoloPath, snap.yoloText ?? string.Empty);
         }
 
+        int w = width, h = height;
+        Vector2[][] allPts = snap.imagePos;
+        bool[][]    allVis = snap.visible;
+
+        if (writeBboxVis && bboxVisDir != null)
+        {
+            string bvPath = Path.Combine(bboxVisDir, ts + ".png");
+            byte[] bvBuf = (byte[])rgbTopDown.Clone();
+            float pad = bboxPaddingFraction;
+            int lt = Mathf.Max(1, lineThicknessPx);
+            Color32 bc = bboxVisColor;
+            Interlocked.Increment(ref _inFlight);
+            Task.Run(() =>
+            {
+                try
+                {
+                    for (int p = 0; p < allPts.Length; p++)
+                    {
+                        if (TryComputePersonBboxPx(allPts[p], allVis[p], w, h, pad,
+                                                   out int xmin, out int ymin, out int xmax, out int ymax))
+                            DrawRect(bvBuf, w, h, xmin, ymin, xmax, ymax, lt, bc);
+                    }
+                    var png = ImageConversion.EncodeArrayToPNG(
+                        bvBuf, GraphicsFormat.R8G8B8_UNorm, (uint)w, (uint)h);
+                    File.WriteAllBytes(bvPath, png);
+                }
+                catch (Exception e) { Debug.LogError("[KeypointsRecorder] bbox_vis: " + e); }
+                finally { Interlocked.Decrement(ref _inFlight); }
+            });
+        }
+
         if (!writeKeyrgbOverlay) return;
 
         string path = Path.Combine(keyrgbDir, ts + ".png");
-        int w = width, h = height;
         int pointR = pointRadiusPx;
         int lineT = lineThicknessPx;
         bool drawSkel = drawSkeleton;
 
         byte[] buf = (byte[])rgbTopDown.Clone();
-        Vector2[][] allPts = snap.imagePos;
-        bool[][]    allVis = snap.visible;
 
         Interlocked.Increment(ref _inFlight);
         Task.Run(() =>
@@ -641,6 +680,47 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
     }
 
     // --- JSON helpers ---
+
+    static bool TryComputePersonBboxPx(Vector2[] pts, bool[] vis, int imgW, int imgH,
+                                       float padFraction,
+                                       out int xmin, out int ymin, out int xmax, out int ymax)
+    {
+        xmin = ymin = xmax = ymax = 0;
+        float fxmin = float.PositiveInfinity, fymin = float.PositiveInfinity;
+        float fxmax = float.NegativeInfinity, fymax = float.NegativeInfinity;
+        int count = 0;
+        for (int i = 0; i < pts.Length; i++)
+        {
+            if (!vis[i]) continue;
+            count++;
+            if (pts[i].x < fxmin) fxmin = pts[i].x;
+            if (pts[i].y < fymin) fymin = pts[i].y;
+            if (pts[i].x > fxmax) fxmax = pts[i].x;
+            if (pts[i].y > fymax) fymax = pts[i].y;
+        }
+        if (count < 2) return false;
+
+        float padW = (fxmax - fxmin) * padFraction;
+        float padH = (fymax - fymin) * padFraction;
+        fxmin = Mathf.Clamp(fxmin - padW, 0f, imgW - 1f);
+        fymin = Mathf.Clamp(fymin - padH, 0f, imgH - 1f);
+        fxmax = Mathf.Clamp(fxmax + padW, 0f, imgW - 1f);
+        fymax = Mathf.Clamp(fymax + padH, 0f, imgH - 1f);
+        if (fxmax - fxmin <= 0f || fymax - fymin <= 0f) return false;
+
+        xmin = Mathf.RoundToInt(fxmin); ymin = Mathf.RoundToInt(fymin);
+        xmax = Mathf.RoundToInt(fxmax); ymax = Mathf.RoundToInt(fymax);
+        return true;
+    }
+
+    static void DrawRect(byte[] buf, int w, int h, int xmin, int ymin, int xmax, int ymax,
+                         int thickness, Color32 c)
+    {
+        DrawLine(buf, w, h, xmin, ymin, xmax, ymin, thickness, c); // top
+        DrawLine(buf, w, h, xmin, ymax, xmax, ymax, thickness, c); // bottom
+        DrawLine(buf, w, h, xmin, ymin, xmin, ymax, thickness, c); // left
+        DrawLine(buf, w, h, xmax, ymin, xmax, ymax, thickness, c); // right
+    }
 
     bool TryComputePersonBbox(Vector2[] pts, bool[] vis, int imgW, int imgH,
                               out float xCenter, out float yCenter, out float w, out float h)
