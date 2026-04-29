@@ -440,12 +440,20 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
         sb.Append("\n    \"camera\": ").Append(BuildCameraJson(width, height)).Append(",");
         sb.Append("\n    \"persons\": [");
 
+        // Pre-compute Unity world → OpenCV camera-space transform once per
+        // frame so every keypoint can be cheaply expressed in the convention
+        // used by MeTRAbs / OpenCV / most pose-estimation libraries:
+        // X right, Y down, +Z forward. worldToCameraMatrix gives us GL
+        // camera space (X right, Y up, −Z forward); we flip Y and Z to match.
+        Matrix4x4 worldToCamGL = cam.worldToCameraMatrix;
+
         for (int p = 0; p < personCount; p++)
         {
             var rig = rigs[p];
             var worldPos  = new Vector3[KP_COUNT];
             var worldRot  = new Quaternion[KP_COUNT];
             var localPos  = new Vector3[KP_COUNT];
+            var camPosCv  = new Vector3[KP_COUNT];
             var imagePos  = new Vector2[KP_COUNT];
             var imageDepth = new float[KP_COUNT];
             var visible    = new bool[KP_COUNT];
@@ -457,6 +465,10 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
                 worldPos[i] = wp;
                 worldRot[i] = GetKeypointWorldRotation(rig, i);
                 localPos[i] = root.InverseTransformPoint(wp);
+
+                Vector3 pCamGL = worldToCamGL.MultiplyPoint3x4(wp);
+                camPosCv[i] = new Vector3(pCamGL.x, -pCamGL.y, -pCamGL.z);
+
                 ProjectToImage(wp, width, height, out imagePos[i], out imageDepth[i], out visible[i]);
             }
 
@@ -473,6 +485,7 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
                 sb.Append(", \"world_position\": ").Append(V3(worldPos[i]));
                 sb.Append(", \"world_rotation\": ").Append(Q(worldRot[i]));
                 sb.Append(", \"local_position\": ").Append(V3(localPos[i]));
+                sb.Append(", \"camera_position_opencv\": ").Append(V3(camPosCv[i]));
                 sb.Append(", \"image_position\": [").Append(F(imagePos[i].x)).Append(",").Append(F(imagePos[i].y)).Append("]");
                 sb.Append(", \"image_depth\": ").Append(F(imageDepth[i]));
                 sb.Append(", \"visible\": ").Append(visible[i] ? "true" : "false");
@@ -862,7 +875,7 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
 
         jsonWriter.Write("{\n");
         jsonWriter.Write("  \"dataset\": \"aic\",\n");
-        jsonWriter.Write("  \"coordinate_convention\": { \"image_origin\": \"top_left\", \"unity_screen_origin\": \"bottom_left\", \"world\": \"unity_left_handed_y_up\" },\n");
+        jsonWriter.Write("  \"coordinate_convention\": { \"image_origin\": \"top_left\", \"unity_screen_origin\": \"bottom_left\", \"world\": \"unity_left_handed_y_up\", \"camera_opencv\": \"x_right_y_down_z_forward_meters\" },\n");
         jsonWriter.Write("  \"keypoint_names\": [");
         for (int i = 0; i < AicKeypointNames.Length; i++)
         {
