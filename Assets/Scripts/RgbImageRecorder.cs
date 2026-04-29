@@ -35,6 +35,8 @@ public class RgbImageRecorder : MonoBehaviour, RecordingSession.IFrameSubscriber
     int _inFlight;
 
     public bool WantsFrame => recordRgb && acquired;
+    public bool IsAtCapacity =>
+        Interlocked.CompareExchange(ref _inFlight, 0, 0) >= maxInFlightEncodes;
 
     void Awake()
     {

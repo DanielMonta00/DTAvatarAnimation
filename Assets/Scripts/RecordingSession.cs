@@ -24,6 +24,12 @@ public class RecordingSession : MonoBehaviour
         // The session captures if *any* subscriber returns true.
         bool WantsFrame { get; }
 
+        // True when this subscriber's downstream queue is full and a new
+        // frame would be dropped. The session uses this to skip the *entire*
+        // capture (no JSON, no PNG) when any subscriber is at capacity, so
+        // outputs from different subscribers stay frame-for-frame aligned.
+        bool IsAtCapacity { get; }
+
         // Called once on the main thread when a new session starts.
         // Subscribers should create their own subfolders / files here.
         void OnSessionBegin(string sessionPath);
@@ -243,6 +249,15 @@ public class RecordingSession : MonoBehaviour
             if (refCount == 0) yield break;
             if (!AnySubscriberWantsFrame()) yield break;
             if (Interlocked.CompareExchange(ref _inFlight, 0, 0) >= maxInFlightReadbacks) yield break;
+
+            // Drop the whole frame if any subscriber is at capacity. Keeps
+            // outputs (JSON entries, rgb PNGs, keyrgb PNGs) frame-aligned —
+            // otherwise JSON entries get committed in OnFrameGather while a
+            // throttled subscriber silently skips its PNG in OnFrameDispatch.
+            for (int i = 0; i < subs.Count; i++)
+            {
+                if (subs[i].WantsFrame && subs[i].IsAtCapacity) yield break;
+            }
 
             // Source selection: dome fbo if available, else render Camera into our RT.
             RenderTexture src = null;
