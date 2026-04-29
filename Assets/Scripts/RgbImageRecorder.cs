@@ -93,7 +93,10 @@ public class RgbImageRecorder : MonoBehaviour, RecordingSession.IFrameSubscriber
     public void OnFrameDispatch(int frameIndex, double timestamp, string timestampString,
                                 byte[] rgbTopDown, int width, int height)
     {
-        if (Interlocked.CompareExchange(ref _inFlight, 0, 0) >= maxInFlightEncodes) return;
+        // No drop here — the session-level IsAtCapacity check throttles new
+        // captures. Dropping mid-dispatch breaks alignment with KeypointsRecorder
+        // because by the time this callback fires, other in-flight encodes may
+        // have grown the queue past the limit.
         string path = Path.Combine(rgbDir, timestampString + ".png");
         int w = width, h = height;
         byte[] buf = rgbTopDown; // shared, treat read-only

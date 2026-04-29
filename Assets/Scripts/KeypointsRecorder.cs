@@ -153,11 +153,15 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
     bool sessionReady;
     int _inFlight;
 
-    // Per-frame snapshot: jagged arrays indexed [personIndex][keypointIndex].
+    // Per-frame snapshot: jagged arrays indexed [personIndex][keypointIndex],
+    // plus the pre-built JSON entry. JSON is written in OnFrameDispatch (not
+    // OnFrameGather) so a frame whose readback errors or whose dispatch is
+    // skipped will not leave an orphan JSON entry without a matching PNG.
     struct FrameSnapshot
     {
         public Vector2[][] imagePos;
         public bool[][]    visible;
+        public string      frameJson;
     }
     readonly Dictionary<int, FrameSnapshot> pending = new Dictionary<int, FrameSnapshot>();
     readonly object pendingLock = new object();
@@ -447,19 +451,18 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
         sb.Append("\n  }");
 
         string frameJson = sb.ToString();
-        lock (jsonLock)
-        {
-            if (jsonWriter != null)
-            {
-                if (!jsonFirstFrame) jsonWriter.Write(",\n");
-                jsonWriter.Write(frameJson);
-                jsonFirstFrame = false;
-            }
-        }
 
+        // Stash the JSON + per-person pixel coords; OnFrameDispatch writes
+        // them only when the readback actually delivers bytes, so a frame
+        // whose readback errors or never dispatches doesn't leave an orphan
+        // JSON entry.
         lock (pendingLock)
         {
-            pending[frameIndex] = new FrameSnapshot { imagePos = allImagePos, visible = allVisible };
+            pending[frameIndex] = new FrameSnapshot {
+                imagePos = allImagePos,
+                visible  = allVisible,
+                frameJson = frameJson,
+            };
         }
     }
 
@@ -477,8 +480,20 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
         }
         if (!found) return;
 
+        // Commit the JSON entry now that we know the readback succeeded.
+        // No drop here — the session-level IsAtCapacity throttles new captures
+        // instead, so JSON and PNG counts stay aligned.
+        lock (jsonLock)
+        {
+            if (jsonWriter != null)
+            {
+                if (!jsonFirstFrame) jsonWriter.Write(",\n");
+                jsonWriter.Write(snap.frameJson);
+                jsonFirstFrame = false;
+            }
+        }
+
         if (!writeKeyrgbOverlay) return;
-        if (Interlocked.CompareExchange(ref _inFlight, 0, 0) >= maxInFlightEncodes) return;
 
         string path = Path.Combine(keyrgbDir, ts + ".png");
         int w = width, h = height;
