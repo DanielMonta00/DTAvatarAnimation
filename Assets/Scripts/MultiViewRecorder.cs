@@ -468,7 +468,7 @@ public class MultiViewRecorder : MonoBehaviour
                     {
                         int remaining = Interlocked.Decrement(ref pendingReadbacks);
                         if (remaining == 0)
-                            CommitFrame(ts, frameJson, allBytes, hadError, imgPosByCam, visByCam);
+                            CommitFrame(idx, relTime, ts, frameJson, allBytes, hadError, imgPosByCam, visByCam);
                     }
                 });
             }
@@ -476,7 +476,8 @@ public class MultiViewRecorder : MonoBehaviour
         finally { _capturing = false; }
     }
 
-    void CommitFrame(string ts, string frameJson, byte[][] allBytes, int[] hadError,
+    void CommitFrame(int frameIndex, double timestamp, string ts, string frameJson,
+                     byte[][] allBytes, int[] hadError,
                      Vector2[][][] imgPosByCam, bool[][][] visByCam)
     {
         // Drop the entire frame if any camera's readback failed; that keeps
