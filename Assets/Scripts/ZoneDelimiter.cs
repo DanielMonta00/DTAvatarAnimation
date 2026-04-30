@@ -15,15 +15,15 @@ public class ZoneDelimiter : MonoBehaviour
     public bool autoResolveCornersOnValidate = true;
 
     [Header("Visualization")]
-    [Tooltip("Color of the floor outline and the upward light strips.")]
-    public Color zoneColor = new Color(0.2f, 1f, 0.4f, 0.85f);
-    [Tooltip("Height of the illusory walls drawn upward from the floor rectangle.")]
+    [Tooltip("Wall color. The alpha at the floor; fades to 0 at the top.")]
+    public Color zoneColor = new Color(0.2f, 1f, 0.4f, 0.4f);
+    [Tooltip("Height of the translucent walls drawn upward from the floor rectangle.")]
     public float wallHeight = 2.0f;
-    [Tooltip("Number of vertical light strips drawn along each edge (in addition to the corner pillars).")]
-    public int lightStripsPerEdge = 6;
-    [Tooltip("Number of fade segments per vertical strip — higher = smoother fade.")]
-    public int stripFadeSegments = 14;
-    [Tooltip("Falloff exponent for the upward alpha fade (1 = linear, 2 = quadratic).")]
+    [Tooltip("Number of horizontal slices stacked to fake the vertical alpha fade. Higher = smoother gradient, more gizmo draws (each slice is a translucent cube).")]
+    public int wallFadeSteps = 32;
+    [Tooltip("Visual thickness of each translucent wall (purely cosmetic — doesn't affect physics).")]
+    public float wallVisualThickness = 0.05f;
+    [Tooltip("Falloff exponent for the upward alpha fade (1 = linear, 2 = quadratic, 3 = cubic).")]
     public float fadePower = 2.0f;
 
     [Header("Physics walls")]
@@ -181,61 +181,49 @@ public class ZoneDelimiter : MonoBehaviour
         Color baseCol = zoneColor;
         baseCol.a = Mathf.Clamp01(zoneColor.a);
 
-        Vector3 c1 = new Vector3(minX, y, minZ);
-        Vector3 c2 = new Vector3(maxX, y, minZ);
-        Vector3 c3 = new Vector3(maxX, y, maxZ);
-        Vector3 c4 = new Vector3(minX, y, maxZ);
+        float vt = Mathf.Max(0.001f, wallVisualThickness);
+        float lenX = maxX - minX;
+        float lenZ = maxZ - minZ;
 
-        // Floor rectangle — bright.
-        Gizmos.color = baseCol;
-        Gizmos.DrawLine(c1, c2);
-        Gizmos.DrawLine(c2, c3);
-        Gizmos.DrawLine(c3, c4);
-        Gizmos.DrawLine(c4, c1);
-
-        // Top rectangle — dim, hints at the ceiling of the illusory wall.
-        Color topCol = baseCol; topCol.a *= 0.25f;
-        Gizmos.color = topCol;
-        Vector3 t1 = c1 + Vector3.up * wallHeight;
-        Vector3 t2 = c2 + Vector3.up * wallHeight;
-        Vector3 t3 = c3 + Vector3.up * wallHeight;
-        Vector3 t4 = c4 + Vector3.up * wallHeight;
-        Gizmos.DrawLine(t1, t2);
-        Gizmos.DrawLine(t2, t3);
-        Gizmos.DrawLine(t3, t4);
-        Gizmos.DrawLine(t4, t1);
-
-        // Vertical light strips along each edge, plus thicker corner pillars.
-        int strips = Mathf.Max(2, lightStripsPerEdge);
-        for (int i = 0; i <= strips; i++)
-        {
-            float t = (float)i / strips;
-            float xL = Mathf.Lerp(minX, maxX, t);
-            float zL = Mathf.Lerp(minZ, maxZ, t);
-            DrawFadingVertical(new Vector3(xL, y, minZ), wallHeight, baseCol);
-            DrawFadingVertical(new Vector3(xL, y, maxZ), wallHeight, baseCol);
-            DrawFadingVertical(new Vector3(minX, y, zL), wallHeight, baseCol);
-            DrawFadingVertical(new Vector3(maxX, y, zL), wallHeight, baseCol);
-        }
-        DrawFadingVertical(c1, wallHeight, baseCol);
-        DrawFadingVertical(c2, wallHeight, baseCol);
-        DrawFadingVertical(c3, wallHeight, baseCol);
-        DrawFadingVertical(c4, wallHeight, baseCol);
+        // Each wall: an axis-aligned slab (length × wallHeight × visualThickness)
+        // along one edge of the rectangle, sliced horizontally for the fade.
+        DrawFadingWall(
+            center: new Vector3((minX + maxX) * 0.5f, y, minZ),
+            size:   new Vector3(lenX, 0f, vt),
+            height: wallHeight, baseColor: baseCol);
+        DrawFadingWall(
+            center: new Vector3((minX + maxX) * 0.5f, y, maxZ),
+            size:   new Vector3(lenX, 0f, vt),
+            height: wallHeight, baseColor: baseCol);
+        DrawFadingWall(
+            center: new Vector3(minX, y, (minZ + maxZ) * 0.5f),
+            size:   new Vector3(vt, 0f, lenZ),
+            height: wallHeight, baseColor: baseCol);
+        DrawFadingWall(
+            center: new Vector3(maxX, y, (minZ + maxZ) * 0.5f),
+            size:   new Vector3(vt, 0f, lenZ),
+            height: wallHeight, baseColor: baseCol);
     }
 
-    void DrawFadingVertical(Vector3 bottom, float height, Color baseColor)
+    // Stack of thin translucent cubes along the wall's length, decreasing
+    // alpha from the floor up to fake a vertical fade. `size.y` is replaced
+    // by the per-slice height; `center.y` is the bottom of the wall.
+    void DrawFadingWall(Vector3 center, Vector3 size, float height, Color baseColor)
     {
-        int segs = Mathf.Max(2, stripFadeSegments);
-        for (int s = 0; s < segs; s++)
+        int slices = Mathf.Max(2, wallFadeSteps);
+        float sliceH = height / slices;
+        Vector3 sliceSize = new Vector3(size.x, sliceH, size.z);
+        for (int i = 0; i < slices; i++)
         {
-            float t0 = (float)s / segs;
-            float t1 = (float)(s + 1) / segs;
-            float alpha = baseColor.a * Mathf.Pow(1f - t0, fadePower);
+            float t = i / (float)(slices - 1);
+            float alpha = baseColor.a * Mathf.Pow(1f - t, fadePower);
             Color col = baseColor; col.a = alpha;
             Gizmos.color = col;
-            Gizmos.DrawLine(
-                bottom + Vector3.up * (t0 * height),
-                bottom + Vector3.up * (t1 * height));
+            Vector3 sliceCenter = new Vector3(
+                center.x,
+                center.y + sliceH * 0.5f + t * (height - sliceH),
+                center.z);
+            Gizmos.DrawCube(sliceCenter, sliceSize);
         }
     }
 }
