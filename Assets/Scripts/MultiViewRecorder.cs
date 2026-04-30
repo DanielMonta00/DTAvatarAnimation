@@ -138,6 +138,12 @@ public class MultiViewRecorder : MonoBehaviour
     static readonly string[] BoneNames_Head          = { "Head"                                         };
     static readonly string[] BoneNames_Neck          = { "Neck"                                         };
 
+    // Optional marker GameObjects (empty children on the prefab) that pin
+    // a keypoint at an exact world position, bypassing the bone+offset
+    // heuristic for the head_top / neck cases.
+    static readonly string[] MarkerNames_HeadTop = { "head_top", "HeadTop", "headtop", "skull_top" };
+    static readonly string[] MarkerNames_Neck    = { "neck_marker", "NeckMarker" };
+
     readonly List<AvatarRig> rigs = new List<AvatarRig>();
     readonly List<CameraSlot> slots = new List<CameraSlot>();
 
@@ -604,6 +610,22 @@ public class MultiViewRecorder : MonoBehaviour
 
         if (neck != null) { rig.keypointTransforms[13] = neck; rig.keypointModes[13] = KpMode.Bone; }
         else              { rig.keypointTransforms[13] = null; rig.keypointModes[13] = KpMode.MidShoulder; }
+
+        // Marker overrides — empty GameObjects added on the prefab at the
+        // exact world position. If found, they win over the heuristic and
+        // we read their position verbatim (KpMode.Bone, no offset applied).
+        Transform headTopMarker = FindBoneByName(rig.animator.transform, MarkerNames_HeadTop);
+        if (headTopMarker != null)
+        {
+            rig.keypointTransforms[12] = headTopMarker;
+            rig.keypointModes[12] = KpMode.Bone;
+        }
+        Transform neckMarker = FindBoneByName(rig.animator.transform, MarkerNames_Neck);
+        if (neckMarker != null)
+        {
+            rig.keypointTransforms[13] = neckMarker;
+            rig.keypointModes[13] = KpMode.Bone;
+        }
     }
 
     static Transform ResolveBone(Animator anim, bool isHumanoid, HumanBodyBones bone, string[] nameCandidates)
