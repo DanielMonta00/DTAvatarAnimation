@@ -18,9 +18,11 @@ public class RandomWalker : MonoBehaviour
     public float turnSpeedDegrees = 120f;     // degrees/sec when rotating towards target
 
     [Header("Behavior timing")]
-    public float minChangeInterval = 1.0f;    // seconds (minimum time between heading changes)
-    public float maxChangeInterval = 4.0f;    // seconds (maximum time between heading changes)
-    public float maxTurnAngle = 90f;          // when choosing a random heading, choose +/- this angle
+    public float minChangeInterval = 1.5f;    // seconds (minimum time between heading changes — average ~2s)
+    public float maxChangeInterval = 2.5f;    // seconds (maximum time between heading changes)
+    public float maxTurnAngle = 135f;         // when choosing a random heading, choose +/- this angle (wider = more aggressive direction changes)
+    [Tooltip("Probability per change of picking a completely random heading (0-360°) instead of an incremental ±maxTurnAngle. Helps break circular wandering patterns.")]
+    [Range(0f, 1f)] public float fullRandomHeadingChance = 0.25f;
 
     [Header("Obstacle avoidance")]
     public float obstacleDetectDistance = 1.0f; // raycast distance to detect obstacles in front
@@ -147,11 +149,19 @@ public class RandomWalker : MonoBehaviour
             }
         }
 
-        // Randomly choose a new heading occasionally (unless avoidance just set one)
-        if (Time.time >= nextChangeTime && !avoided)
+        // Random heading change. Fires on schedule even when avoidance just
+        // fired this frame — without this, walking along a zone wall keeps
+        // re-triggering avoidance and the random change never gets to run,
+        // producing circular loops along the perimeter. If the random heading
+        // happens to point into a wall, next frame's avoidance corrects it.
+        if (Time.time >= nextChangeTime)
         {
-            float rand = Random.Range(-maxTurnAngle, maxTurnAngle);
-            targetRotation = Quaternion.Euler(0f, transform.eulerAngles.y + rand, 0f);
+            float newY;
+            if (Random.value < fullRandomHeadingChance)
+                newY = Random.Range(0f, 360f);            // total reset — breaks loops
+            else
+                newY = transform.eulerAngles.y + Random.Range(-maxTurnAngle, maxTurnAngle);
+            targetRotation = Quaternion.Euler(0f, newY, 0f);
             ScheduleNextChange();
         }
 
