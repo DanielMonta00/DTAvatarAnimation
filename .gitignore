@@ -16,6 +16,8 @@
 *.suo
 *.user
 *.userprefs
+*.prefab
+*.prefab.meta
 .vs/
 .idea/
 .vscode/
