@@ -27,16 +27,17 @@ public class ZoneDelimiter : MonoBehaviour
     public float fadePower = 2.0f;
 
     [Header("Physics walls")]
-    [Tooltip("At runtime, spawn 4 invisible trigger BoxColliders along the edges so a RandomWalker's spherecast obstacle avoidance treats the zone as walls. Triggers — they don't block other physics objects.")]
+    [Tooltip("At runtime, spawn 4 invisible BoxColliders along the edges. Solid (non-trigger) so the avatar's CharacterController physically cannot pass through.")]
     public bool spawnInvisibleWalls = true;
-    [Tooltip("Thickness of the spawned wall colliders.")]
-    public float wallThickness = 0.1f;
+    [Tooltip("Thickness of the spawned wall colliders. Keep this larger than the avatar's worst-case per-frame movement (forwardSpeed * dt + backupDistance) — sub-thin walls can be tunneled through in a single frame.")]
+    public float wallThickness = 0.4f;
+    [Tooltip("Solid wall (non-trigger) blocks CharacterControllers / Rigidbodies. Disable to fall back to a trigger which only smart spherecast-based avoiders 'see' — but those can be bypassed (see SphereCast: 'colliders the sphere already overlaps are not detected'), so triggers do not give guaranteed containment.")]
+    public bool wallsArePhysicalBarriers = true;
     [Tooltip("Unity layer index (0-31) for the spawned wall colliders. Setup for 'only selected avatars are confined':\n" +
-             "  1. Project Settings → Tags and Layers → name an unused layer e.g. 'ZoneWall' (say index 8).\n" +
-             "  2. Set this field to that index (8).\n" +
-             "  3. On each RandomWalker that SHOULD be confined, set obstacleLayers to include that layer.\n" +
-             "  4. Walkers that shouldn't be confined leave it out of their mask and walk through freely.\n" +
-             "Other physics objects (camera, props) are never affected because the walls are triggers.")]
+             "  1. Project Settings → Tags and Layers → name an unused layer e.g. 'ZoneWall' (say index 8). Optionally name another, e.g. 'ConfinedAvatar', and put the avatar(s) you want confined on it.\n" +
+             "  2. Set this field to the wall layer's index.\n" +
+             "  3. Project Settings → Physics → Layer Collision Matrix: tick ZoneWall × ConfinedAvatar (so they collide), untick ZoneWall × every other layer (so nothing else does).\n" +
+             "  4. Optional: also include the wall layer in each confined RandomWalker's obstacleLayers so the avatar steers away before bumping the wall.")]
     [Range(0, 31)] public int wallLayer = 0;
 
     GameObject wallsRoot;
@@ -105,8 +106,10 @@ public class ZoneDelimiter : MonoBehaviour
         go.layer = Mathf.Clamp(wallLayer, 0, 31);
         var bc = go.AddComponent<BoxCollider>();
         bc.size = worldSize;
-        bc.isTrigger = true;   // RandomWalker's obstacle probe uses QueryTriggerInteraction.Collide,
-                               // so triggers are detected without blocking other physics objects.
+        // Solid by default: CharacterControllers and Rigidbodies cannot tunnel through.
+        // Set wallsArePhysicalBarriers=false to fall back to a trigger (informational only,
+        // not containment-safe — spherecasts miss colliders they already overlap).
+        bc.isTrigger = !wallsArePhysicalBarriers;
     }
 
     void DestroyWalls()
