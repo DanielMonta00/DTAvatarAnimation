@@ -47,8 +47,12 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
 
     [Header("Recording")]
     public bool recordKeypoints = false;
-    [Tooltip("If enabled, write keyrgb/{t}.png with the keypoint overlay drawn on the captured image. Disable when you only need the JSON.")]
+    [Tooltip("If enabled, write keyrgb/{t}.{png|jpg} with the keypoint overlay drawn on the captured image. Disable when you only need the JSON.")]
     public bool writeKeyrgbOverlay = true;
+    [Tooltip("Image encoding for the keyrgb output. JPEG ~10x smaller; PNG lossless.")]
+    public CaptureImageFormat imageFormat = CaptureImageFormat.JPEG;
+    [Tooltip("JPEG quality 1-100. 90 visually indistinguishable from PNG.")]
+    [Range(1, 100)] public int jpegQuality = 90;
     [Tooltip("If enabled, write bboxes/{t}.txt with one YOLO-format line per avatar (class x_center y_center w h, all normalized).")]
     public bool writeYoloBboxes = true;
     [Tooltip("YOLO class id used for every avatar's person bbox. 0 matches the COCO 'person' class.")]
@@ -457,9 +461,10 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
         sb.Append("  {");
         sb.Append("\n    \"frame_index\": ").Append(frameIndex).Append(",");
         sb.Append("\n    \"timestamp\": ").Append(F(timestamp)).Append(",");
-        sb.Append("\n    \"rgb_path\": \"").Append($"rgb/{ts}.png").Append("\",");
+        string ext = CaptureSettings.Extension(imageFormat);
+        sb.Append("\n    \"rgb_path\": \"").Append($"rgb/{ts}").Append(ext).Append("\",");
         if (writeKeyrgbOverlay)
-            sb.Append("\n    \"keyrgb_path\": \"").Append($"keyrgb/{ts}.png").Append("\",");
+            sb.Append("\n    \"keyrgb_path\": \"").Append($"keyrgb/{ts}").Append(ext).Append("\",");
         sb.Append("\n    \"image_size\": [").Append(width).Append(",").Append(height).Append("],");
         sb.Append("\n    \"camera\": ").Append(BuildCameraJson(width, height)).Append(",");
         sb.Append("\n    \"persons\": [");
@@ -634,10 +639,12 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
 
         if (!writeKeyrgbOverlay) return;
 
-        string path = Path.Combine(keyrgbDir, ts + ".png");
+        string path = Path.Combine(keyrgbDir, ts + CaptureSettings.Extension(imageFormat));
         int pointR = pointRadiusPx;
         int lineT = lineThicknessPx;
         bool drawSkel = drawSkeleton;
+        var fmt = imageFormat;
+        var q = jpegQuality;
 
         byte[] buf = (byte[])rgbTopDown.Clone();
 
@@ -648,9 +655,10 @@ public class KeypointsRecorder : MonoBehaviour, RecordingSession.IFrameSubscribe
             {
                 for (int p = 0; p < allPts.Length; p++)
                     DrawOverlay(buf, w, h, allPts[p], allVis[p], pointR, lineT, drawSkel);
-                var png = ImageConversion.EncodeArrayToPNG(
-                    buf, GraphicsFormat.R8G8B8_UNorm, (uint)w, (uint)h);
-                File.WriteAllBytes(path, png);
+                byte[] enc = (fmt == CaptureImageFormat.JPEG)
+                    ? ImageConversion.EncodeArrayToJPG(buf, GraphicsFormat.R8G8B8_UNorm, (uint)w, (uint)h, 0, q)
+                    : ImageConversion.EncodeArrayToPNG(buf, GraphicsFormat.R8G8B8_UNorm, (uint)w, (uint)h);
+                File.WriteAllBytes(path, enc);
             }
             catch (Exception e) { Debug.LogError("[KeypointsRecorder] " + e); }
             finally { Interlocked.Decrement(ref _inFlight); }

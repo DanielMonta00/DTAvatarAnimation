@@ -66,6 +66,10 @@ public class RecordingSession : MonoBehaviour
     public int frameRate = 30;
     [Tooltip("Flip rows so saved PNGs follow top-down image convention.")]
     public bool flipOutputY = true;
+    [Tooltip("Capture target resolution for non-dome cameras. Native = use the camera's display resolution. Custom = use customWidth/customHeight below.")]
+    public CaptureResolution captureResolution = CaptureResolution.Native;
+    public int customWidth = 1920;
+    public int customHeight = 1080;
 
     public string sessionPath { get; private set; }
 
@@ -176,8 +180,9 @@ public class RecordingSession : MonoBehaviour
             // URP, so a dedicated Camera is the clean route.
             if (domeCam == null && cam != null)
             {
-                int w = Mathf.Max(16, cam.pixelWidth);
-                int h = Mathf.Max(16, cam.pixelHeight);
+                CaptureSettings.Resolve(captureResolution,
+                    cam.pixelWidth, cam.pixelHeight, customWidth, customHeight,
+                    out int w, out int h);
                 if (fallbackRT == null || fallbackRT.width != w || fallbackRT.height != h)
                 {
                     if (fallbackRT != null) { fallbackRT.Release(); Destroy(fallbackRT); }

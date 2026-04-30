@@ -21,7 +21,11 @@ public class RgbImageRecorder : MonoBehaviour, RecordingSession.IFrameSubscriber
 {
     [Header("Recording")]
     public bool recordRgb = false;
-    [Tooltip("Max PNG encodes queued on background threads. Drops frames past this.")]
+    [Tooltip("Image encoding for the saved frames. JPEG (~10x smaller) is the standard for ML-friendly pose datasets — COCO/AIC/MPII all ship JPEG. PNG is lossless if you specifically need it.")]
+    public CaptureImageFormat imageFormat = CaptureImageFormat.JPEG;
+    [Tooltip("JPEG quality 1-100. 90 is visually indistinguishable from PNG; 80 is COCO's stored quality; <70 introduces visible blocking.")]
+    [Range(1, 100)] public int jpegQuality = 90;
+    [Tooltip("Max image encodes queued on background threads. Drops frames past this.")]
     public int maxInFlightEncodes = 4;
 
     [Header("Preview")]
@@ -97,17 +101,20 @@ public class RgbImageRecorder : MonoBehaviour, RecordingSession.IFrameSubscriber
         // captures. Dropping mid-dispatch breaks alignment with KeypointsRecorder
         // because by the time this callback fires, other in-flight encodes may
         // have grown the queue past the limit.
-        string path = Path.Combine(rgbDir, timestampString + ".png");
+        string path = Path.Combine(rgbDir, timestampString + CaptureSettings.Extension(imageFormat));
         int w = width, h = height;
         byte[] buf = rgbTopDown; // shared, treat read-only
+        var fmt = imageFormat;
+        var q = jpegQuality;
         Interlocked.Increment(ref _inFlight);
         Task.Run(() =>
         {
             try
             {
-                var png = ImageConversion.EncodeArrayToPNG(
-                    buf, GraphicsFormat.R8G8B8_UNorm, (uint)w, (uint)h);
-                File.WriteAllBytes(path, png);
+                byte[] enc = (fmt == CaptureImageFormat.JPEG)
+                    ? ImageConversion.EncodeArrayToJPG(buf, GraphicsFormat.R8G8B8_UNorm, (uint)w, (uint)h, 0, q)
+                    : ImageConversion.EncodeArrayToPNG(buf, GraphicsFormat.R8G8B8_UNorm, (uint)w, (uint)h);
+                File.WriteAllBytes(path, enc);
             }
             catch (Exception e) { Debug.LogError("[RgbImageRecorder] " + e); }
             finally { Interlocked.Decrement(ref _inFlight); }
