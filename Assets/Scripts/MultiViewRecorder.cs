@@ -68,7 +68,15 @@ public class MultiViewRecorder : MonoBehaviour
 
     [Header("Recording")]
     public bool record = false;
-    [Tooltip("Write keyrgb_N/{t}.png with keypoint overlays. Disable for fastest captures.")]
+    [Tooltip("Image encoding for rgb_N and keyrgb_N. JPEG (~10x smaller) is the standard ML format; PNG is lossless.")]
+    public CaptureImageFormat imageFormat = CaptureImageFormat.JPEG;
+    [Tooltip("JPEG quality 1-100. 90 visually indistinguishable from PNG.")]
+    [Range(1, 100)] public int jpegQuality = 90;
+    [Tooltip("Capture target resolution applied to every camera's RT. Native = each camera uses its own pixelWidth/Height; Custom = use customWidth/customHeight below.")]
+    public CaptureResolution captureResolution = CaptureResolution.Native;
+    public int customWidth = 1920;
+    public int customHeight = 1080;
+    [Tooltip("Write keyrgb_N/{t}.{png|jpg} with keypoint overlays. Disable for fastest captures.")]
     public bool writeKeyrgbOverlay = true;
     [Tooltip("Write bboxes_N/{t}.txt with YOLO-format person bboxes (one line per visible avatar).")]
     public bool writeYoloBboxes = true;
@@ -265,12 +273,15 @@ public class MultiViewRecorder : MonoBehaviour
         {
             var c = validCams[i];
             int idx1 = i + 1;
+            CaptureSettings.Resolve(captureResolution,
+                c.pixelWidth, c.pixelHeight, customWidth, customHeight,
+                out int slotW, out int slotH);
             var slot = new CameraSlot
             {
                 cam = c,
                 index1 = idx1,
-                width = Mathf.Max(16, c.pixelWidth),
-                height = Mathf.Max(16, c.pixelHeight),
+                width = slotW,
+                height = slotH,
             };
             slot.rgbDir = Path.Combine(sessionPath, $"rgb_{idx1}");
             Directory.CreateDirectory(slot.rgbDir);
@@ -511,16 +522,21 @@ public class MultiViewRecorder : MonoBehaviour
             }
 
             // RGB encode.
-            string rgbPath = Path.Combine(slot.rgbDir, ts + ".png");
+            string rgbExt = CaptureSettings.Extension(imageFormat);
+            string rgbPath = Path.Combine(slot.rgbDir, ts + rgbExt);
             byte[] rgbBuf = bytes;
             int wRgb = w, hRgb = h;
+            var fmt = imageFormat;
+            var q = jpegQuality;
             Interlocked.Increment(ref _inFlightEncodes);
             Task.Run(() =>
             {
                 try
                 {
-                    var png = ImageConversion.EncodeArrayToPNG(rgbBuf, GraphicsFormat.R8G8B8_UNorm, (uint)wRgb, (uint)hRgb);
-                    File.WriteAllBytes(rgbPath, png);
+                    byte[] enc = (fmt == CaptureImageFormat.JPEG)
+                        ? ImageConversion.EncodeArrayToJPG(rgbBuf, GraphicsFormat.R8G8B8_UNorm, (uint)wRgb, (uint)hRgb, 0, q)
+                        : ImageConversion.EncodeArrayToPNG(rgbBuf, GraphicsFormat.R8G8B8_UNorm, (uint)wRgb, (uint)hRgb);
+                    File.WriteAllBytes(rgbPath, enc);
                 }
                 catch (Exception e) { Debug.LogError("[MultiViewRecorder] rgb: " + e); }
                 finally { Interlocked.Decrement(ref _inFlightEncodes); }
@@ -533,8 +549,10 @@ public class MultiViewRecorder : MonoBehaviour
                 int lineT = lineThicknessPx;
                 bool drawSkel = drawSkeleton;
                 byte[] krBuf = (byte[])bytes.Clone();
-                string krPath = Path.Combine(slot.keyrgbDir, ts + ".png");
+                string krPath = Path.Combine(slot.keyrgbDir, ts + rgbExt);
                 int wK = w, hK = h;
+                var krFmt = imageFormat;
+                var krQ = jpegQuality;
                 Interlocked.Increment(ref _inFlightEncodes);
                 Task.Run(() =>
                 {
@@ -542,8 +560,10 @@ public class MultiViewRecorder : MonoBehaviour
                     {
                         for (int p = 0; p < allPts.Length; p++)
                             DrawOverlay(krBuf, wK, hK, allPts[p], allVis[p], pointR, lineT, drawSkel);
-                        var png = ImageConversion.EncodeArrayToPNG(krBuf, GraphicsFormat.R8G8B8_UNorm, (uint)wK, (uint)hK);
-                        File.WriteAllBytes(krPath, png);
+                        byte[] enc = (krFmt == CaptureImageFormat.JPEG)
+                            ? ImageConversion.EncodeArrayToJPG(krBuf, GraphicsFormat.R8G8B8_UNorm, (uint)wK, (uint)hK, 0, krQ)
+                            : ImageConversion.EncodeArrayToPNG(krBuf, GraphicsFormat.R8G8B8_UNorm, (uint)wK, (uint)hK);
+                        File.WriteAllBytes(krPath, enc);
                     }
                     catch (Exception e) { Debug.LogError("[MultiViewRecorder] keyrgb: " + e); }
                     finally { Interlocked.Decrement(ref _inFlightEncodes); }
@@ -871,11 +891,12 @@ public class MultiViewRecorder : MonoBehaviour
         sb.Append("  {");
         sb.Append("\n    \"frame_index\": ").Append(idx).Append(",");
         sb.Append("\n    \"timestamp\": ").Append(F(relTime)).Append(",");
+        string ext = CaptureSettings.Extension(imageFormat);
         sb.Append("\n    \"rgb_paths\": [");
         for (int c = 0; c < slotCount; c++)
         {
             if (c > 0) sb.Append(", ");
-            sb.Append("\"rgb_").Append(slots[c].index1).Append("/").Append(ts).Append(".png\"");
+            sb.Append("\"rgb_").Append(slots[c].index1).Append("/").Append(ts).Append(ext).Append("\"");
         }
         sb.Append("],");
         if (writeKeyrgbOverlay)
@@ -884,7 +905,7 @@ public class MultiViewRecorder : MonoBehaviour
             for (int c = 0; c < slotCount; c++)
             {
                 if (c > 0) sb.Append(", ");
-                sb.Append("\"keyrgb_").Append(slots[c].index1).Append("/").Append(ts).Append(".png\"");
+                sb.Append("\"keyrgb_").Append(slots[c].index1).Append("/").Append(ts).Append(ext).Append("\"");
             }
             sb.Append("],");
         }
