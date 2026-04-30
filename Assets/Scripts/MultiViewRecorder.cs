@@ -16,19 +16,21 @@ using System.Threading.Tasks;
 // in the Inspector if you want to add/remove/reorder.
 //
 // Per session, writes:
-//   <session>/rgb_N/{ts}.png         RGB image from camera N
-//   <session>/keyrgb_N/{ts}.png      RGB + keypoint overlay (if enabled)
-//   <session>/bboxes_N/{ts}.txt      YOLO labels for camera N (if enabled)
-//   <session>/bbox_vis_N/{ts}.png    YOLO bboxes drawn on RGB (debug, if enabled)
-//   <session>/K.json                 Intrinsics + image size for every camera
-//   <session>/keypoints_transforms.json
-//                                    Per-frame keypoint transforms with per-camera
-//                                    projections (image_position, depth, visibility,
-//                                    OpenCV camera-space pose).
+//   <session>/cameras.json                       Intrinsics + extrinsics per camera
+//   <session>/keypoints_transforms.json          Per-frame keypoint transforms with
+//                                                per-camera projections.
+//   <session>/cam_N/rgb/{ts}.{jpg|png}           RGB image from camera N
+//   <session>/cam_N/keyrgb/{ts}.{jpg|png}        RGB + keypoint overlay (if enabled)
+//   <session>/cam_N/bboxes/{ts}.json             Per-frame bbox JSON (if enabled)
+//   <session>/cam_N/bbox_vis/{ts}.png            Bboxes drawn on RGB (debug, if enabled)
+//
+// Layout is symmetric per camera so cam_N is a self-contained folder you can
+// copy / rsync / inspect independently. cameras.json is the single calibration
+// file consumers should read first to know what's in each cam_N/.
 //
 // Frame alignment: all per-camera outputs share the same timestamp filename. A
 // frame is committed only after every camera's GPU readback succeeds, so the
-// JSON entry count equals the file count in each rgb_N/ folder.
+// JSON entry count equals the file count in each cam_N/rgb/ folder.
 [DefaultExecutionOrder(900)]
 public class MultiViewRecorder : MonoBehaviour
 {
@@ -68,7 +70,7 @@ public class MultiViewRecorder : MonoBehaviour
 
     [Header("Recording")]
     public bool record = false;
-    [Tooltip("Image encoding for rgb_N and keyrgb_N. JPEG (~10x smaller) is the standard ML format; PNG is lossless.")]
+    [Tooltip("Image encoding for cam_N/rgb/ and cam_N/keyrgb/. JPEG (~10x smaller) is the standard ML format; PNG is lossless.")]
     public CaptureImageFormat imageFormat = CaptureImageFormat.JPEG;
     [Tooltip("JPEG quality 1-100. 90 visually indistinguishable from PNG.")]
     [Range(1, 100)] public int jpegQuality = 90;
@@ -76,11 +78,11 @@ public class MultiViewRecorder : MonoBehaviour
     public CaptureResolution captureResolution = CaptureResolution.Native;
     public int customWidth = 1920;
     public int customHeight = 1080;
-    [Tooltip("Write keyrgb_N/{t}.{png|jpg} with keypoint overlays. Disable for fastest captures.")]
+    [Tooltip("Write cam_N/keyrgb/{t}.{png|jpg} with keypoint overlays. Disable for fastest captures.")]
     public bool writeKeyrgbOverlay = true;
-    [Tooltip("Write bboxes_N/{t}.txt with YOLO-format person bboxes (one line per visible avatar).")]
+    [Tooltip("Write cam_N/bboxes/{t}.json with one entry per visible avatar (YOLO normalized + pixel xyxy + person/avatar metadata).")]
     public bool writeYoloBboxes = true;
-    [Tooltip("Debug: write bbox_vis_N/{t}.png with rectangles drawn over the captured frame.")]
+    [Tooltip("Debug: write cam_N/bbox_vis/{t}.png with rectangles drawn over the captured frame.")]
     public bool writeBboxVis = false;
     public int yoloClassId = 0;
     public float bboxPaddingFraction = 0.1f;
@@ -127,7 +129,7 @@ public class MultiViewRecorder : MonoBehaviour
         public RenderTexture prevTarget;
         public string rgbDir, keyrgbDir, bboxDir, bboxVisDir;
         public int width, height;
-        public int index1; // 1-based folder index (rgb_1/, rgb_2/, ...)
+        public int index1; // 1-based folder index (cam_1/, cam_2/, ...)
     }
 
     // Bone-name candidates for Generic rigs (mirrors KeypointsRecorder).
@@ -283,21 +285,23 @@ public class MultiViewRecorder : MonoBehaviour
                 width = slotW,
                 height = slotH,
             };
-            slot.rgbDir = Path.Combine(sessionPath, $"rgb_{idx1}");
+            string camRoot = Path.Combine(sessionPath, $"cam_{idx1}");
+            Directory.CreateDirectory(camRoot);
+            slot.rgbDir = Path.Combine(camRoot, "rgb");
             Directory.CreateDirectory(slot.rgbDir);
             if (writeKeyrgbOverlay)
             {
-                slot.keyrgbDir = Path.Combine(sessionPath, $"keyrgb_{idx1}");
+                slot.keyrgbDir = Path.Combine(camRoot, "keyrgb");
                 Directory.CreateDirectory(slot.keyrgbDir);
             }
             if (writeYoloBboxes)
             {
-                slot.bboxDir = Path.Combine(sessionPath, $"bboxes_{idx1}");
+                slot.bboxDir = Path.Combine(camRoot, "bboxes");
                 Directory.CreateDirectory(slot.bboxDir);
             }
             if (writeBboxVis)
             {
-                slot.bboxVisDir = Path.Combine(sessionPath, $"bbox_vis_{idx1}");
+                slot.bboxVisDir = Path.Combine(camRoot, "bbox_vis");
                 Directory.CreateDirectory(slot.bboxVisDir);
             }
             slot.rt = new RenderTexture(slot.width, slot.height, 24, RenderTextureFormat.ARGB32);
@@ -308,7 +312,7 @@ public class MultiViewRecorder : MonoBehaviour
         }
 
         OpenJsonWriter();
-        WriteKJson();
+        WriteCamerasJson();
 
         frameCounter = 0;
         recordingStartTime = -1.0;
@@ -504,21 +508,43 @@ public class MultiViewRecorder : MonoBehaviour
             Vector2[][] allPts = imgPosByCam[c];
             bool[][]    allVis = visByCam[c];
 
-            // YOLO bboxes: tiny synchronous text write.
+            // Per-frame bbox JSON. Carries normalized YOLO + pixel xyxy + person
+            // metadata; richer than the old single-line .txt and uses .json for
+            // dataset symmetry.
             if (writeYoloBboxes && slot.bboxDir != null)
             {
-                var sb = new StringBuilder(allPts.Length * 64);
+                var sb = new StringBuilder(256 + allPts.Length * 256);
+                sb.Append("{\n");
+                sb.Append("  \"frame_index\": ").Append(frameIndex).Append(",\n");
+                sb.Append("  \"timestamp\": ").Append(F(timestamp)).Append(",\n");
+                sb.Append("  \"image_size\": [").Append(w).Append(", ").Append(h).Append("],\n");
+                sb.Append("  \"camera_id\": \"cam_").Append(slot.index1).Append("\",\n");
+                sb.Append("  \"boxes\": [");
+                int written = 0;
                 for (int p = 0; p < allPts.Length; p++)
                 {
-                    if (TryComputePersonBbox(allPts[p], allVis[p], w, h, bboxPaddingFraction,
-                                             out float xc, out float yc, out float bw, out float bh))
-                    {
-                        sb.Append(yoloClassId).Append(' ')
-                          .Append(F(xc)).Append(' ').Append(F(yc)).Append(' ')
-                          .Append(F(bw)).Append(' ').Append(F(bh)).Append('\n');
-                    }
+                    if (!TryComputePersonBbox(allPts[p], allVis[p], w, h, bboxPaddingFraction,
+                                              out float xc, out float yc, out float bw, out float bh))
+                        continue;
+                    float x1 = (xc - 0.5f * bw) * w;
+                    float y1 = (yc - 0.5f * bh) * h;
+                    float x2 = (xc + 0.5f * bw) * w;
+                    float y2 = (yc + 0.5f * bh) * h;
+                    sb.Append(written == 0 ? "\n    " : ",\n    ");
+                    sb.Append("{ \"class_id\": ").Append(yoloClassId);
+                    sb.Append(", \"class_name\": \"person\"");
+                    sb.Append(", \"person_index\": ").Append(p);
+                    if (p < rigs.Count && rigs[p].animator != null)
+                        sb.Append(", \"avatar_name\": \"").Append(rigs[p].animator.name).Append("\"");
+                    sb.Append(", \"yolo\": [").Append(F(xc)).Append(", ").Append(F(yc))
+                      .Append(", ").Append(F(bw)).Append(", ").Append(F(bh)).Append("]");
+                    sb.Append(", \"xyxy_px\": [").Append(F(x1)).Append(", ").Append(F(y1))
+                      .Append(", ").Append(F(x2)).Append(", ").Append(F(y2)).Append("]");
+                    sb.Append(" }");
+                    written++;
                 }
-                File.WriteAllText(Path.Combine(slot.bboxDir, ts + ".txt"), sb.ToString());
+                sb.Append(written > 0 ? "\n  ]\n}\n" : "]\n}\n");
+                File.WriteAllText(Path.Combine(slot.bboxDir, ts + ".json"), sb.ToString());
             }
 
             // RGB encode.
@@ -891,23 +917,38 @@ public class MultiViewRecorder : MonoBehaviour
         sb.Append("  {");
         sb.Append("\n    \"frame_index\": ").Append(idx).Append(",");
         sb.Append("\n    \"timestamp\": ").Append(F(relTime)).Append(",");
+        // rgb_paths / keyrgb_paths as { "cam_N": "cam_N/rgb/<t>.<ext>" } dicts —
+        // safer than positional arrays if a camera is dropped or reordered later.
         string ext = CaptureSettings.Extension(imageFormat);
-        sb.Append("\n    \"rgb_paths\": [");
+        sb.Append("\n    \"rgb_paths\": {");
         for (int c = 0; c < slotCount; c++)
         {
-            if (c > 0) sb.Append(", ");
-            sb.Append("\"rgb_").Append(slots[c].index1).Append("/").Append(ts).Append(ext).Append("\"");
+            if (c > 0) sb.Append(",");
+            sb.Append("\n      \"cam_").Append(slots[c].index1).Append("\": ");
+            sb.Append("\"cam_").Append(slots[c].index1).Append("/rgb/").Append(ts).Append(ext).Append("\"");
         }
-        sb.Append("],");
+        sb.Append(slotCount > 0 ? "\n    }," : "},");
         if (writeKeyrgbOverlay)
         {
-            sb.Append("\n    \"keyrgb_paths\": [");
+            sb.Append("\n    \"keyrgb_paths\": {");
             for (int c = 0; c < slotCount; c++)
             {
-                if (c > 0) sb.Append(", ");
-                sb.Append("\"keyrgb_").Append(slots[c].index1).Append("/").Append(ts).Append(ext).Append("\"");
+                if (c > 0) sb.Append(",");
+                sb.Append("\n      \"cam_").Append(slots[c].index1).Append("\": ");
+                sb.Append("\"cam_").Append(slots[c].index1).Append("/keyrgb/").Append(ts).Append(ext).Append("\"");
             }
-            sb.Append("],");
+            sb.Append(slotCount > 0 ? "\n    }," : "},");
+        }
+        if (writeYoloBboxes)
+        {
+            sb.Append("\n    \"bbox_paths\": {");
+            for (int c = 0; c < slotCount; c++)
+            {
+                if (c > 0) sb.Append(",");
+                sb.Append("\n      \"cam_").Append(slots[c].index1).Append("\": ");
+                sb.Append("\"cam_").Append(slots[c].index1).Append("/bboxes/").Append(ts).Append(".json\"");
+            }
+            sb.Append(slotCount > 0 ? "\n    }," : "},");
         }
         sb.Append("\n    \"persons\": [");
 
@@ -949,7 +990,7 @@ public class MultiViewRecorder : MonoBehaviour
         return sb.ToString();
     }
 
-    void WriteKJson()
+    void WriteCamerasJson()
     {
         if (string.IsNullOrEmpty(sessionPath)) return;
         var sb = new StringBuilder(1024 + slots.Count * 256);
@@ -968,10 +1009,13 @@ public class MultiViewRecorder : MonoBehaviour
 
             if (c > 0) sb.Append(",\n");
             sb.Append("    {");
-            sb.Append(" \"index\": ").Append(slot.index1);
+            sb.Append(" \"id\": \"cam_").Append(slot.index1).Append("\"");
+            sb.Append(", \"index\": ").Append(slot.index1);
             sb.Append(", \"name\": \"").Append(cam.name).Append("\"");
-            sb.Append(", \"rgb_dir\": \"rgb_").Append(slot.index1).Append("\"");
-            if (writeYoloBboxes) sb.Append(", \"bboxes_dir\": \"bboxes_").Append(slot.index1).Append("\"");
+            sb.Append(", \"folder\": \"cam_").Append(slot.index1).Append("\"");
+            sb.Append(", \"rgb_dir\": \"cam_").Append(slot.index1).Append("/rgb\"");
+            if (writeKeyrgbOverlay) sb.Append(", \"keyrgb_dir\": \"cam_").Append(slot.index1).Append("/keyrgb\"");
+            if (writeYoloBboxes)    sb.Append(", \"bboxes_dir\": \"cam_").Append(slot.index1).Append("/bboxes\"");
             sb.Append(", \"model\": \"pinhole\"");
             sb.Append(", \"image_size\": [").Append(w).Append(", ").Append(h).Append("]");
             sb.Append(", \"fx\": ").Append(F(fx));
@@ -990,7 +1034,7 @@ public class MultiViewRecorder : MonoBehaviour
             sb.Append(" }");
         }
         sb.Append("\n  ]\n}\n");
-        File.WriteAllText(Path.Combine(sessionPath, "K.json"), sb.ToString());
+        File.WriteAllText(Path.Combine(sessionPath, "cameras.json"), sb.ToString());
     }
 
     static string V3(Vector3 v) => string.Format(CultureInfo.InvariantCulture, "[{0:F6},{1:F6},{2:F6}]", v.x, v.y, v.z);
@@ -1045,15 +1089,20 @@ public class MultiViewRecorder : MonoBehaviour
             jsonWriter.Write("]");
         }
         jsonWriter.Write("],\n");
-        // Camera summary in this file too, so consumers don't need K.json.
+        // Camera summary mirrored here so consumers can do everything from
+        // keypoints_transforms.json alone (cameras.json is the canonical source).
         jsonWriter.Write("  \"cameras\": [");
         for (int c = 0; c < slots.Count; c++)
         {
             if (c > 0) jsonWriter.Write(",");
-            jsonWriter.Write(" { \"index\": ");
+            jsonWriter.Write(" { \"id\": \"cam_");
+            jsonWriter.Write(slots[c].index1.ToString(CultureInfo.InvariantCulture));
+            jsonWriter.Write("\", \"index\": ");
             jsonWriter.Write(slots[c].index1.ToString(CultureInfo.InvariantCulture));
             jsonWriter.Write(", \"name\": \"");
             jsonWriter.Write(slots[c].cam.name);
+            jsonWriter.Write("\", \"folder\": \"cam_");
+            jsonWriter.Write(slots[c].index1.ToString(CultureInfo.InvariantCulture));
             jsonWriter.Write("\", \"image_size\": [");
             jsonWriter.Write(slots[c].width.ToString(CultureInfo.InvariantCulture));
             jsonWriter.Write(", ");
