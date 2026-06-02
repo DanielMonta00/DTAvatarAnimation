@@ -34,27 +34,253 @@ using System.Threading.Tasks;
 [DefaultExecutionOrder(900)]
 public class MultiViewRecorder : MonoBehaviour
 {
-    public const int KP_COUNT = 14;
-
-    public static readonly string[] AicKeypointNames =
+    // Skeleton format enum for ViTPose datasets
+    public enum SkeletonFormat
     {
-        "right_shoulder", "right_elbow", "right_wrist",
-        "left_shoulder",  "left_elbow",  "left_wrist",
-        "right_hip", "right_knee", "right_ankle",
-        "left_hip",  "left_knee",  "left_ankle",
-        "head_top", "neck",
-    };
+        AIC,       // 14 keypoints
+        COCO,      // 17 keypoints
+        MPII,      // 16 keypoints
+        CrowdPose  // 14 keypoints
+    }
 
-    static readonly int[,] Skeleton =
+    // Skeleton format definitions
+    [System.Serializable]
+    public class SkeletonFormatDef
     {
-        {2,1},{1,0},{0,13},{13,3},{3,4},{4,5},
-        {8,7},{7,6},{6,9},{9,10},{10,11},
-        {12,13},{0,6},{3,9}
-    };
+        public string[] keypointNames;
+        public int[,] skeleton;
+        public string[] boneNameLeftUpperArm;
+        public string[] boneNameRightUpperArm;
+        public string[] boneNameLeftLowerArm;
+        public string[] boneNameRightLowerArm;
+        public string[] boneNameLeftHand;
+        public string[] boneNameRightHand;
+        public string[] boneNameLeftUpperLeg;
+        public string[] boneNameRightUpperLeg;
+        public string[] boneNameLeftLowerLeg;
+        public string[] boneNameRightLowerLeg;
+        public string[] boneNameLeftFoot;
+        public string[] boneNameRightFoot;
+        public string[] boneNameHead;
+        public string[] boneNameNeck;
+        public string[] boneNameNose;
+        public string[] boneNameLeftEye;
+        public string[] boneNameRightEye;
+        public string[] boneNameLeftEar;
+        public string[] boneNameRightEar;
+        public string[] boneNamePelvis;
+        public string[] boneNameThorax;
+        public string[] boneNameUpperNeck;
+    }
+
+    public int GetKeypointCount(SkeletonFormat format)
+    {
+        return format switch
+        {
+            SkeletonFormat.AIC => 14,
+            SkeletonFormat.COCO => 17,
+            SkeletonFormat.MPII => 16,
+            SkeletonFormat.CrowdPose => 14,
+            _ => 14
+        };
+    }
+
+    public SkeletonFormatDef GetSkeletonFormat(SkeletonFormat format)
+    {
+        return format switch
+        {
+            SkeletonFormat.COCO => CreateCOCOFormat(),
+            SkeletonFormat.MPII => CreateMPIIFormat(),
+            SkeletonFormat.CrowdPose => CreateCrowdPoseFormat(),
+            _ => CreateAICFormat()
+        };
+    }
+
+    static SkeletonFormatDef CreateAICFormat()
+    {
+        return new SkeletonFormatDef
+        {
+            keypointNames = new[]
+            {
+                "right_shoulder", "right_elbow", "right_wrist",
+                "left_shoulder",  "left_elbow",  "left_wrist",
+                "right_hip", "right_knee", "right_ankle",
+                "left_hip",  "left_knee",  "left_ankle",
+                "head_top", "neck",
+            },
+            skeleton = new[,]
+            {
+                {2,1},{1,0},{0,13},{13,3},{3,4},{4,5},
+                {8,7},{7,6},{6,9},{9,10},{10,11},
+                {12,13},{0,6},{3,9}
+            },
+            boneNameLeftUpperArm = new[] { "LeftArm", "LeftUpperArm", "L_UpperArm" },
+            boneNameRightUpperArm = new[] { "RightArm", "RightUpperArm", "R_UpperArm" },
+            boneNameLeftLowerArm = new[] { "LeftForeArm", "LeftLowerArm", "L_ForeArm" },
+            boneNameRightLowerArm = new[] { "RightForeArm", "RightLowerArm", "R_ForeArm" },
+            boneNameLeftHand = new[] { "LeftHand", "L_Hand" },
+            boneNameRightHand = new[] { "RightHand", "R_Hand" },
+            boneNameLeftUpperLeg = new[] { "LeftUpLeg", "LeftUpperLeg", "L_UpperLeg", "LeftThigh" },
+            boneNameRightUpperLeg = new[] { "RightUpLeg", "RightUpperLeg", "R_UpperLeg", "RightThigh" },
+            boneNameLeftLowerLeg = new[] { "LeftLeg", "LeftLowerLeg", "L_LowerLeg", "LeftCalf" },
+            boneNameRightLowerLeg = new[] { "RightLeg", "RightLowerLeg", "R_LowerLeg", "RightCalf" },
+            boneNameLeftFoot = new[] { "LeftFoot", "L_Foot" },
+            boneNameRightFoot = new[] { "RightFoot", "R_Foot" },
+            boneNameHead = new[] { "Head" },
+            boneNameNeck = new[] { "Neck" },
+            boneNameNose = new string[] { },
+            boneNameLeftEye = new string[] { },
+            boneNameRightEye = new string[] { },
+            boneNameLeftEar = new string[] { },
+            boneNameRightEar = new string[] { },
+            boneNamePelvis = new string[] { },
+            boneNameThorax = new string[] { },
+            boneNameUpperNeck = new string[] { }
+        };
+    }
+
+    static SkeletonFormatDef CreateCOCOFormat()
+    {
+        return new SkeletonFormatDef
+        {
+            keypointNames = new[]
+            {
+                "nose",
+                "left_eye", "right_eye",
+                "left_ear", "right_ear",
+                "left_shoulder", "right_shoulder",
+                "left_elbow", "right_elbow",
+                "left_wrist", "right_wrist",
+                "left_hip", "right_hip",
+                "left_knee", "right_knee",
+                "left_ankle", "right_ankle"
+            },
+            skeleton = new[,]
+            {
+                {0,1},{0,2},{1,3},{2,4},{3,5},{4,6},
+                {5,7},{7,9},{6,8},{8,10},
+                {5,11},{6,12},{11,13},{13,15},{12,14},{14,16},
+                {11,12}
+            },
+            boneNameLeftUpperArm = new[] { "LeftArm", "LeftUpperArm", "L_UpperArm" },
+            boneNameRightUpperArm = new[] { "RightArm", "RightUpperArm", "R_UpperArm" },
+            boneNameLeftLowerArm = new[] { "LeftForeArm", "LeftLowerArm", "L_ForeArm" },
+            boneNameRightLowerArm = new[] { "RightForeArm", "RightLowerArm", "R_ForeArm" },
+            boneNameLeftHand = new[] { "LeftHand", "L_Hand" },
+            boneNameRightHand = new[] { "RightHand", "R_Hand" },
+            boneNameLeftUpperLeg = new[] { "LeftUpLeg", "LeftUpperLeg", "L_UpperLeg", "LeftThigh" },
+            boneNameRightUpperLeg = new[] { "RightUpLeg", "RightUpperLeg", "R_UpperLeg", "RightThigh" },
+            boneNameLeftLowerLeg = new[] { "LeftLeg", "LeftLowerLeg", "L_LowerLeg", "LeftCalf" },
+            boneNameRightLowerLeg = new[] { "RightLeg", "RightLowerLeg", "R_LowerLeg", "RightCalf" },
+            boneNameLeftFoot = new[] { "LeftFoot", "L_Foot" },
+            boneNameRightFoot = new[] { "RightFoot", "R_Foot" },
+            boneNameHead = new[] { "Head" },
+            boneNameNeck = new[] { "Neck" },
+            boneNameNose = new[] { "Nose", "nose" },
+            boneNameLeftEye = new[] { "LeftEye", "Eye_L" },
+            boneNameRightEye = new[] { "RightEye", "Eye_R" },
+            boneNameLeftEar = new[] { "LeftEar", "Ear_L" },
+            boneNameRightEar = new[] { "RightEar", "Ear_R" },
+            boneNamePelvis = new string[] { },
+            boneNameThorax = new string[] { },
+            boneNameUpperNeck = new string[] { }
+        };
+    }
+
+    static SkeletonFormatDef CreateMPIIFormat()
+    {
+        return new SkeletonFormatDef
+        {
+            keypointNames = new[]
+            {
+                "right_ankle", "right_knee", "right_hip",
+                "left_hip", "left_knee", "left_ankle",
+                "pelvis", "thorax", "upper_neck", "head",
+                "right_wrist", "right_elbow", "right_shoulder",
+                "left_shoulder", "left_elbow", "left_wrist"
+            },
+            skeleton = new[,]
+            {
+                {0,1},{1,2},{2,6},{3,4},{4,5},{6,3},{7,6},{8,7},
+                {9,8},{10,11},{11,12},{12,2},{13,3},{14,13},{15,14},{12,13}
+            },
+            boneNameLeftUpperArm = new[] { "LeftArm", "LeftUpperArm", "L_UpperArm" },
+            boneNameRightUpperArm = new[] { "RightArm", "RightUpperArm", "R_UpperArm" },
+            boneNameLeftLowerArm = new[] { "LeftForeArm", "LeftLowerArm", "L_ForeArm" },
+            boneNameRightLowerArm = new[] { "RightForeArm", "RightLowerArm", "R_ForeArm" },
+            boneNameLeftHand = new[] { "LeftHand", "L_Hand" },
+            boneNameRightHand = new[] { "RightHand", "R_Hand" },
+            boneNameLeftUpperLeg = new[] { "LeftUpLeg", "LeftUpperLeg", "L_UpperLeg", "LeftThigh" },
+            boneNameRightUpperLeg = new[] { "RightUpLeg", "RightUpperLeg", "R_UpperLeg", "RightThigh" },
+            boneNameLeftLowerLeg = new[] { "LeftLeg", "LeftLowerLeg", "L_LowerLeg", "LeftCalf" },
+            boneNameRightLowerLeg = new[] { "RightLeg", "RightLowerLeg", "R_LowerLeg", "RightCalf" },
+            boneNameLeftFoot = new[] { "LeftFoot", "L_Foot" },
+            boneNameRightFoot = new[] { "RightFoot", "R_Foot" },
+            boneNameHead = new[] { "Head" },
+            boneNameNeck = new[] { "Neck" },
+            boneNameNose = new string[] { },
+            boneNameLeftEye = new string[] { },
+            boneNameRightEye = new string[] { },
+            boneNameLeftEar = new string[] { },
+            boneNameRightEar = new string[] { },
+            boneNamePelvis = new[] { "Pelvis", "Hips", "Spine" },
+            boneNameThorax = new[] { "Thorax", "Spine1", "Chest" },
+            boneNameUpperNeck = new[] { "UpperNeck", "UpperSpine" }
+        };
+    }
+
+    static SkeletonFormatDef CreateCrowdPoseFormat()
+    {
+        return new SkeletonFormatDef
+        {
+            keypointNames = new[]
+            {
+                "left_shoulder", "right_shoulder",
+                "left_elbow", "right_elbow",
+                "left_wrist", "right_wrist",
+                "left_hip", "right_hip",
+                "left_knee", "right_knee",
+                "left_ankle", "right_ankle",
+                "top_head", "neck"
+            },
+            skeleton = new[,]
+            {
+                {0,2},{2,4},{1,3},{3,5},
+                {6,7},{6,8},{8,10},{7,9},{9,11},
+                {0,1},{0,6},{1,7},{13,12},{0,13},{1,13}
+            },
+            boneNameLeftUpperArm = new[] { "LeftArm", "LeftUpperArm", "L_UpperArm" },
+            boneNameRightUpperArm = new[] { "RightArm", "RightUpperArm", "R_UpperArm" },
+            boneNameLeftLowerArm = new[] { "LeftForeArm", "LeftLowerArm", "L_ForeArm" },
+            boneNameRightLowerArm = new[] { "RightForeArm", "RightLowerArm", "R_ForeArm" },
+            boneNameLeftHand = new[] { "LeftHand", "L_Hand" },
+            boneNameRightHand = new[] { "RightHand", "R_Hand" },
+            boneNameLeftUpperLeg = new[] { "LeftUpLeg", "LeftUpperLeg", "L_UpperLeg", "LeftThigh" },
+            boneNameRightUpperLeg = new[] { "RightUpLeg", "RightUpperLeg", "R_UpperLeg", "RightThigh" },
+            boneNameLeftLowerLeg = new[] { "LeftLeg", "LeftLowerLeg", "L_LowerLeg", "LeftCalf" },
+            boneNameRightLowerLeg = new[] { "RightLeg", "RightLowerLeg", "R_LowerLeg", "RightCalf" },
+            boneNameLeftFoot = new[] { "LeftFoot", "L_Foot" },
+            boneNameRightFoot = new[] { "RightFoot", "R_Foot" },
+            boneNameHead = new[] { "Head" },
+            boneNameNeck = new[] { "Neck" },
+            boneNameNose = new string[] { },
+            boneNameLeftEye = new string[] { },
+            boneNameRightEye = new string[] { },
+            boneNameLeftEar = new string[] { },
+            boneNameRightEar = new string[] { },
+            boneNamePelvis = new string[] { },
+            boneNameThorax = new string[] { },
+            boneNameUpperNeck = new string[] { }
+        };
+    }
 
     [Header("Subjects")]
     [Tooltip("Animators to track (multi-person). Each becomes one entry in the per-frame 'persons' array.")]
     public List<Animator> avatars = new List<Animator>();
+
+    [Header("Skeleton Format")]
+    [Tooltip("Select skeleton format for ViTPose datasets (AIC, COCO, MPII, CrowdPose). Missing joints will be skipped.")]
+    public SkeletonFormat skeletonFormat = SkeletonFormat.AIC;
 
     [Header("Cameras")]
     [Tooltip("Cameras to capture. Auto-populated from descendant GameObjects on Reset and via the context menu. Editable.")]
@@ -101,25 +327,27 @@ public class MultiViewRecorder : MonoBehaviour
     public bool drawSkeleton = true;
     public Color bboxVisColor = new Color(1f, 1f, 0f, 1f);
 
-    static readonly Color32[] keypointColors =
-    {
-        new Color32(255,128,  0,255), new Color32(255,128,  0,255), new Color32(255,128,  0,255),
-        new Color32(  0,255,  0,255), new Color32(  0,255,  0,255), new Color32(  0,255,  0,255),
-        new Color32(255,128,  0,255), new Color32(255,128,  0,255), new Color32(255,128,  0,255),
-        new Color32(  0,255,  0,255), new Color32(  0,255,  0,255), new Color32(  0,255,  0,255),
-        new Color32( 51,153,255,255), new Color32( 51,153,255,255),
-    };
-
     enum KpMode { Bone, HeadTopOffset, MidShoulder }
 
     class AvatarRig
     {
         public Animator animator;
-        public readonly Transform[] keypointTransforms = new Transform[KP_COUNT];
-        public readonly KpMode[] keypointModes = new KpMode[KP_COUNT];
+        public SkeletonFormat format;
+        public int keypointCount;
+        public Transform[] keypointTransforms;
+        public KpMode[] keypointModes;
         public Transform leftShoulderBone;
         public Transform rightShoulderBone;
         public bool bonesResolved;
+
+        public AvatarRig(SkeletonFormat format, int kpCount)
+        {
+            this.format = format;
+            this.keypointCount = kpCount;
+            this.keypointTransforms = new Transform[kpCount];
+            this.keypointModes = new KpMode[kpCount];
+            this.bonesResolved = false;
+        }
     }
 
     class CameraSlot
@@ -133,21 +361,8 @@ public class MultiViewRecorder : MonoBehaviour
     }
 
     // Bone-name candidates for Generic rigs (mirrors KeypointsRecorder).
-    static readonly string[] BoneNames_LeftUpperArm  = { "LeftArm",      "LeftUpperArm",  "L_UpperArm"  };
-    static readonly string[] BoneNames_RightUpperArm = { "RightArm",     "RightUpperArm", "R_UpperArm"  };
-    static readonly string[] BoneNames_LeftLowerArm  = { "LeftForeArm",  "LeftLowerArm",  "L_ForeArm"   };
-    static readonly string[] BoneNames_RightLowerArm = { "RightForeArm", "RightLowerArm", "R_ForeArm"   };
-    static readonly string[] BoneNames_LeftHand      = { "LeftHand",     "L_Hand"                       };
-    static readonly string[] BoneNames_RightHand     = { "RightHand",    "R_Hand"                       };
-    static readonly string[] BoneNames_LeftUpperLeg  = { "LeftUpLeg",    "LeftUpperLeg",  "L_UpperLeg", "LeftThigh" };
-    static readonly string[] BoneNames_RightUpperLeg = { "RightUpLeg",   "RightUpperLeg", "R_UpperLeg", "RightThigh" };
-    static readonly string[] BoneNames_LeftLowerLeg  = { "LeftLeg",      "LeftLowerLeg",  "L_LowerLeg", "LeftCalf"  };
-    static readonly string[] BoneNames_RightLowerLeg = { "RightLeg",     "RightLowerLeg", "R_LowerLeg", "RightCalf" };
-    static readonly string[] BoneNames_LeftFoot      = { "LeftFoot",     "L_Foot"                       };
-    static readonly string[] BoneNames_RightFoot     = { "RightFoot",    "R_Foot"                       };
-    static readonly string[] BoneNames_Head          = { "Head"                                         };
-    static readonly string[] BoneNames_Neck          = { "Neck"                                         };
-
+    // Note: Individual bone candidates are now stored in SkeletonFormatDef classes per format.
+    
     // Optional marker GameObjects (empty children on the prefab) that pin
     // a keypoint at an exact world position, bypassing the bone+offset
     // heuristic for the head_top / neck cases.
@@ -247,10 +462,11 @@ public class MultiViewRecorder : MonoBehaviour
 
         // Build avatar rigs.
         rigs.Clear();
+        int kpCount = GetKeypointCount(skeletonFormat);
         foreach (var anim in avatars)
         {
             if (anim == null) continue;
-            var rig = new AvatarRig { animator = anim };
+            var rig = new AvatarRig(skeletonFormat, kpCount) { animator = anim };
             ResolveRig(rig);
             rig.bonesResolved = HasAnyResolvedBone(rig);
             if (!rig.bonesResolved)
@@ -376,10 +592,11 @@ public class MultiViewRecorder : MonoBehaviour
             {
                 var rig = rigs[p];
                 Transform root = rig.animator.transform;
-                var wp = new Vector3[KP_COUNT];
-                var wr = new Quaternion[KP_COUNT];
-                var lp = new Vector3[KP_COUNT];
-                for (int k = 0; k < KP_COUNT; k++)
+                int kpCount = rig.keypointCount;
+                var wp = new Vector3[kpCount];
+                var wr = new Quaternion[kpCount];
+                var lp = new Vector3[kpCount];
+                for (int k = 0; k < kpCount; k++)
                 {
                     wp[k] = GetKeypointWorldPosition(rig, k);
                     wr[k] = GetKeypointWorldRotation(rig, k);
@@ -412,13 +629,15 @@ public class MultiViewRecorder : MonoBehaviour
 
                 for (int p = 0; p < personCount; p++)
                 {
-                    var imgPos   = new Vector2[KP_COUNT];
-                    var vis      = new bool[KP_COUNT];
-                    var camPosCv = new Vector3[KP_COUNT];
-                    var camRotCv = new Quaternion[KP_COUNT];
-                    var imgDepth = new float[KP_COUNT];
+                    var rig = rigs[p];
+                    int kpCount = rig.keypointCount;
+                    var imgPos   = new Vector2[kpCount];
+                    var vis      = new bool[kpCount];
+                    var camPosCv = new Vector3[kpCount];
+                    var camRotCv = new Quaternion[kpCount];
+                    var imgDepth = new float[kpCount];
 
-                    for (int k = 0; k < KP_COUNT; k++)
+                    for (int k = 0; k < kpCount; k++)
                     {
                         Vector3 wp = allWorldPos[p][k];
                         Vector3 pCamGL = w2cGL.MultiplyPoint3x4(wp);
@@ -427,6 +646,10 @@ public class MultiViewRecorder : MonoBehaviour
                         camRotCv[k] = new Quaternion(qBoneCamLH.x, -qBoneCamLH.y, qBoneCamLH.z, qBoneCamLH.w);
                         ProjectPinhole(cam, slot.width, slot.height, wp,
                                        out imgPos[k], out imgDepth[k], out vis[k]);
+                        // Force invisible for unresolved keypoints so null bones
+                        // (e.g. COCO face kps, MPII pelvis/thorax) don't project
+                        // to Vector3.zero and draw wild off-body skeleton lines.
+                        if (!IsKeypointResolved(rig, k)) vis[k] = false;
                     }
                     imgPosByCam[c][p]   = imgPos;
                     visByCam[c][p]      = vis;
@@ -575,6 +798,8 @@ public class MultiViewRecorder : MonoBehaviour
                 int pointR = pointRadiusPx;
                 int lineT = lineThicknessPx;
                 bool drawSkel = drawSkeleton;
+                SkeletonFormatDef skeletonDef = GetSkeletonFormat(skeletonFormat);
+                Color32[] colors = GetKeypointColors(skeletonFormat, GetKeypointCount(skeletonFormat));
                 byte[] krBuf = (byte[])bytes.Clone();
                 string krPath = Path.Combine(slot.keyrgbDir, ts + rgbExt);
                 int wK = w, hK = h;
@@ -586,7 +811,7 @@ public class MultiViewRecorder : MonoBehaviour
                     try
                     {
                         for (int p = 0; p < allPts.Length; p++)
-                            DrawOverlay(krBuf, wK, hK, allPts[p], allVis[p], pointR, lineT, drawSkel);
+                            DrawOverlay(krBuf, wK, hK, allPts[p], allVis[p], pointR, lineT, drawSkel, skeletonDef, colors);
                         byte[] enc = (krFmt == CaptureImageFormat.JPEG)
                             ? ImageConversion.EncodeArrayToJPG(krBuf, GraphicsFormat.R8G8B8_UNorm, (uint)wK, (uint)hK, 0, krQ)
                             : ImageConversion.EncodeArrayToPNG(krBuf, GraphicsFormat.R8G8B8_UNorm, (uint)wK, (uint)hK);
@@ -633,24 +858,47 @@ public class MultiViewRecorder : MonoBehaviour
     {
         Animator a = rig.animator;
         bool isHumanoid = a.isHuman;
+        SkeletonFormatDef format = GetSkeletonFormat(rig.format);
 
-        rig.leftShoulderBone  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftUpperArm,  BoneNames_LeftUpperArm);
-        rig.rightShoulderBone = ResolveBone(a, isHumanoid, HumanBodyBones.RightUpperArm, BoneNames_RightUpperArm);
-        Transform head = ResolveBone(a, isHumanoid, HumanBodyBones.Head, BoneNames_Head);
-        Transform neck = ResolveBone(a, isHumanoid, HumanBodyBones.Neck, BoneNames_Neck);
+        rig.leftShoulderBone  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftUpperArm,  format.boneNameLeftUpperArm);
+        rig.rightShoulderBone = ResolveBone(a, isHumanoid, HumanBodyBones.RightUpperArm, format.boneNameRightUpperArm);
+        Transform head = ResolveBone(a, isHumanoid, HumanBodyBones.Head, format.boneNameHead);
+        Transform neck = ResolveBone(a, isHumanoid, HumanBodyBones.Neck, format.boneNameNeck);
 
+        // Resolve keypoints based on skeleton format
+        switch (rig.format)
+        {
+            case SkeletonFormat.AIC:
+                ResolveAICRig(a, isHumanoid, rig, format, head, neck);
+                break;
+            case SkeletonFormat.COCO:
+                ResolveCOCORig(a, isHumanoid, rig, format, head, neck);
+                break;
+            case SkeletonFormat.MPII:
+                ResolveMPIIRig(a, isHumanoid, rig, format, head, neck);
+                break;
+            case SkeletonFormat.CrowdPose:
+                ResolveCrowdPoseRig(a, isHumanoid, rig, format, head, neck);
+                break;
+        }
+
+        rig.bonesResolved = true;
+    }
+
+    void ResolveAICRig(Animator a, bool isHumanoid, AvatarRig rig, SkeletonFormatDef format, Transform head, Transform neck)
+    {
         rig.keypointTransforms[0]  = rig.rightShoulderBone;
-        rig.keypointTransforms[1]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightLowerArm, BoneNames_RightLowerArm);
-        rig.keypointTransforms[2]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightHand,     BoneNames_RightHand);
+        rig.keypointTransforms[1]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightLowerArm, format.boneNameRightLowerArm);
+        rig.keypointTransforms[2]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightHand,     format.boneNameRightHand);
         rig.keypointTransforms[3]  = rig.leftShoulderBone;
-        rig.keypointTransforms[4]  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftLowerArm,  BoneNames_LeftLowerArm);
-        rig.keypointTransforms[5]  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftHand,      BoneNames_LeftHand);
-        rig.keypointTransforms[6]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightUpperLeg, BoneNames_RightUpperLeg);
-        rig.keypointTransforms[7]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightLowerLeg, BoneNames_RightLowerLeg);
-        rig.keypointTransforms[8]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightFoot,     BoneNames_RightFoot);
-        rig.keypointTransforms[9]  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftUpperLeg,  BoneNames_LeftUpperLeg);
-        rig.keypointTransforms[10] = ResolveBone(a, isHumanoid, HumanBodyBones.LeftLowerLeg,  BoneNames_LeftLowerLeg);
-        rig.keypointTransforms[11] = ResolveBone(a, isHumanoid, HumanBodyBones.LeftFoot,      BoneNames_LeftFoot);
+        rig.keypointTransforms[4]  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftLowerArm,  format.boneNameLeftLowerArm);
+        rig.keypointTransforms[5]  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftHand,      format.boneNameLeftHand);
+        rig.keypointTransforms[6]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightUpperLeg, format.boneNameRightUpperLeg);
+        rig.keypointTransforms[7]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightLowerLeg, format.boneNameRightLowerLeg);
+        rig.keypointTransforms[8]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightFoot,     format.boneNameRightFoot);
+        rig.keypointTransforms[9]  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftUpperLeg,  format.boneNameLeftUpperLeg);
+        rig.keypointTransforms[10] = ResolveBone(a, isHumanoid, HumanBodyBones.LeftLowerLeg,  format.boneNameLeftLowerLeg);
+        rig.keypointTransforms[11] = ResolveBone(a, isHumanoid, HumanBodyBones.LeftFoot,      format.boneNameLeftFoot);
 
         if (head != null) { rig.keypointTransforms[12] = head; rig.keypointModes[12] = KpMode.HeadTopOffset; }
         else              { rig.keypointTransforms[12] = null; rig.keypointModes[12] = KpMode.Bone; }
@@ -658,20 +906,126 @@ public class MultiViewRecorder : MonoBehaviour
         if (neck != null) { rig.keypointTransforms[13] = neck; rig.keypointModes[13] = KpMode.Bone; }
         else              { rig.keypointTransforms[13] = null; rig.keypointModes[13] = KpMode.MidShoulder; }
 
+        ApplyMarkerOverrides(rig, format);
+    }
+
+    void ResolveCOCORig(Animator a, bool isHumanoid, AvatarRig rig, SkeletonFormatDef format, Transform head, Transform neck)
+    {
+        // 0: nose
+        rig.keypointTransforms[0]  = ResolveBone(a, isHumanoid, HumanBodyBones.Head, format.boneNameNose);
+        // 1: left_eye, 2: right_eye
+        rig.keypointTransforms[1]  = ResolveBone(a, isHumanoid, HumanBodyBones.Head, format.boneNameLeftEye);
+        rig.keypointTransforms[2]  = ResolveBone(a, isHumanoid, HumanBodyBones.Head, format.boneNameRightEye);
+        // 3: left_ear, 4: right_ear
+        rig.keypointTransforms[3]  = ResolveBone(a, isHumanoid, HumanBodyBones.Head, format.boneNameLeftEar);
+        rig.keypointTransforms[4]  = ResolveBone(a, isHumanoid, HumanBodyBones.Head, format.boneNameRightEar);
+        // 5: left_shoulder, 6: right_shoulder
+        rig.keypointTransforms[5]  = rig.leftShoulderBone;
+        rig.keypointTransforms[6]  = rig.rightShoulderBone;
+        // 7: left_elbow, 8: right_elbow
+        rig.keypointTransforms[7]  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftLowerArm,  format.boneNameLeftLowerArm);
+        rig.keypointTransforms[8]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightLowerArm, format.boneNameRightLowerArm);
+        // 9: left_wrist, 10: right_wrist
+        rig.keypointTransforms[9]  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftHand,      format.boneNameLeftHand);
+        rig.keypointTransforms[10] = ResolveBone(a, isHumanoid, HumanBodyBones.RightHand,     format.boneNameRightHand);
+        // 11: left_hip, 12: right_hip
+        rig.keypointTransforms[11] = ResolveBone(a, isHumanoid, HumanBodyBones.LeftUpperLeg,  format.boneNameLeftUpperLeg);
+        rig.keypointTransforms[12] = ResolveBone(a, isHumanoid, HumanBodyBones.RightUpperLeg, format.boneNameRightUpperLeg);
+        // 13: left_knee, 14: right_knee
+        rig.keypointTransforms[13] = ResolveBone(a, isHumanoid, HumanBodyBones.LeftLowerLeg,  format.boneNameLeftLowerLeg);
+        rig.keypointTransforms[14] = ResolveBone(a, isHumanoid, HumanBodyBones.RightLowerLeg, format.boneNameRightLowerLeg);
+        // 15: left_ankle, 16: right_ankle
+        rig.keypointTransforms[15] = ResolveBone(a, isHumanoid, HumanBodyBones.LeftFoot,      format.boneNameLeftFoot);
+        rig.keypointTransforms[16] = ResolveBone(a, isHumanoid, HumanBodyBones.RightFoot,     format.boneNameRightFoot);
+
+        ApplyMarkerOverrides(rig, format);
+    }
+
+    void ResolveMPIIRig(Animator a, bool isHumanoid, AvatarRig rig, SkeletonFormatDef format, Transform head, Transform neck)
+    {
+        // 0: right_ankle, 1: right_knee, 2: right_hip
+        rig.keypointTransforms[0]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightFoot,     format.boneNameRightFoot);
+        rig.keypointTransforms[1]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightLowerLeg, format.boneNameRightLowerLeg);
+        rig.keypointTransforms[2]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightUpperLeg, format.boneNameRightUpperLeg);
+        // 3: left_hip, 4: left_knee, 5: left_ankle
+        rig.keypointTransforms[3]  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftUpperLeg,  format.boneNameLeftUpperLeg);
+        rig.keypointTransforms[4]  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftLowerLeg,  format.boneNameLeftLowerLeg);
+        rig.keypointTransforms[5]  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftFoot,      format.boneNameLeftFoot);
+        // 6: pelvis, 7: thorax, 8: upper_neck, 9: head
+        rig.keypointTransforms[6]  = ResolveBone(a, isHumanoid, HumanBodyBones.Hips, format.boneNamePelvis);
+        rig.keypointTransforms[7]  = ResolveBone(a, isHumanoid, HumanBodyBones.Spine, format.boneNameThorax);
+        rig.keypointTransforms[8]  = ResolveBone(a, isHumanoid, HumanBodyBones.Neck, format.boneNameUpperNeck);
+        rig.keypointTransforms[9]  = head;
+        // 10: right_wrist, 11: right_elbow, 12: right_shoulder
+        rig.keypointTransforms[10] = ResolveBone(a, isHumanoid, HumanBodyBones.RightHand,     format.boneNameRightHand);
+        rig.keypointTransforms[11] = ResolveBone(a, isHumanoid, HumanBodyBones.RightLowerArm, format.boneNameRightLowerArm);
+        rig.keypointTransforms[12] = rig.rightShoulderBone;
+        // 13: left_shoulder, 14: left_elbow, 15: left_wrist
+        rig.keypointTransforms[13] = rig.leftShoulderBone;
+        rig.keypointTransforms[14] = ResolveBone(a, isHumanoid, HumanBodyBones.LeftLowerArm,  format.boneNameLeftLowerArm);
+        rig.keypointTransforms[15] = ResolveBone(a, isHumanoid, HumanBodyBones.LeftHand,      format.boneNameLeftHand);
+
+        ApplyMarkerOverrides(rig, format);
+    }
+
+    void ResolveCrowdPoseRig(Animator a, bool isHumanoid, AvatarRig rig, SkeletonFormatDef format, Transform head, Transform neck)
+    {
+        // 0: left_shoulder, 1: right_shoulder
+        rig.keypointTransforms[0]  = rig.leftShoulderBone;
+        rig.keypointTransforms[1]  = rig.rightShoulderBone;
+        // 2: left_elbow, 3: right_elbow
+        rig.keypointTransforms[2]  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftLowerArm,  format.boneNameLeftLowerArm);
+        rig.keypointTransforms[3]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightLowerArm, format.boneNameRightLowerArm);
+        // 4: left_wrist, 5: right_wrist
+        rig.keypointTransforms[4]  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftHand,      format.boneNameLeftHand);
+        rig.keypointTransforms[5]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightHand,     format.boneNameRightHand);
+        // 6: left_hip, 7: right_hip
+        rig.keypointTransforms[6]  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftUpperLeg,  format.boneNameLeftUpperLeg);
+        rig.keypointTransforms[7]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightUpperLeg, format.boneNameRightUpperLeg);
+        // 8: left_knee, 9: right_knee
+        rig.keypointTransforms[8]  = ResolveBone(a, isHumanoid, HumanBodyBones.LeftLowerLeg,  format.boneNameLeftLowerLeg);
+        rig.keypointTransforms[9]  = ResolveBone(a, isHumanoid, HumanBodyBones.RightLowerLeg, format.boneNameRightLowerLeg);
+        // 10: left_ankle, 11: right_ankle
+        rig.keypointTransforms[10] = ResolveBone(a, isHumanoid, HumanBodyBones.LeftFoot,      format.boneNameLeftFoot);
+        rig.keypointTransforms[11] = ResolveBone(a, isHumanoid, HumanBodyBones.RightFoot,     format.boneNameRightFoot);
+        // 12: top_head, 13: neck
+        if (head != null) { rig.keypointTransforms[12] = head; rig.keypointModes[12] = KpMode.HeadTopOffset; }
+        else              { rig.keypointTransforms[12] = null; rig.keypointModes[12] = KpMode.Bone; }
+
+        if (neck != null) { rig.keypointTransforms[13] = neck; rig.keypointModes[13] = KpMode.Bone; }
+        else              { rig.keypointTransforms[13] = null; rig.keypointModes[13] = KpMode.MidShoulder; }
+
+        ApplyMarkerOverrides(rig, format);
+    }
+
+    void ApplyMarkerOverrides(AvatarRig rig, SkeletonFormatDef format)
+    {
         // Marker overrides — empty GameObjects added on the prefab at the
-        // exact world position. If found, they win over the heuristic and
-        // we read their position verbatim (KpMode.Bone, no offset applied).
+        // exact world position. If found, they win over the heuristic.
         Transform headTopMarker = FindBoneByName(rig.animator.transform, MarkerNames_HeadTop);
         if (headTopMarker != null)
         {
-            rig.keypointTransforms[12] = headTopMarker;
-            rig.keypointModes[12] = KpMode.Bone;
+            // Find head_top keypoint index based on format
+            int headTopIdx = rig.format == SkeletonFormat.AIC ? 12 : 
+                             rig.format == SkeletonFormat.CrowdPose ? 12 : -1;
+            if (headTopIdx >= 0 && headTopIdx < rig.keypointCount)
+            {
+                rig.keypointTransforms[headTopIdx] = headTopMarker;
+                rig.keypointModes[headTopIdx] = KpMode.Bone;
+            }
         }
+
         Transform neckMarker = FindBoneByName(rig.animator.transform, MarkerNames_Neck);
         if (neckMarker != null)
         {
-            rig.keypointTransforms[13] = neckMarker;
-            rig.keypointModes[13] = KpMode.Bone;
+            // Find neck keypoint index based on format
+            int neckIdx = rig.format == SkeletonFormat.AIC ? 13 :
+                          rig.format == SkeletonFormat.CrowdPose ? 13 : -1;
+            if (neckIdx >= 0 && neckIdx < rig.keypointCount)
+            {
+                rig.keypointTransforms[neckIdx] = neckMarker;
+                rig.keypointModes[neckIdx] = KpMode.Bone;
+            }
         }
     }
 
@@ -709,9 +1063,19 @@ public class MultiViewRecorder : MonoBehaviour
         return null;
     }
 
+    bool IsKeypointResolved(AvatarRig rig, int i)
+    {
+        switch (rig.keypointModes[i])
+        {
+            case KpMode.HeadTopOffset: return rig.keypointTransforms[i] != null;
+            case KpMode.MidShoulder:   return rig.leftShoulderBone != null && rig.rightShoulderBone != null;
+            default:                   return rig.keypointTransforms[i] != null;
+        }
+    }
+
     static bool HasAnyResolvedBone(AvatarRig rig)
     {
-        for (int i = 0; i < KP_COUNT; i++)
+        for (int i = 0; i < rig.keypointCount; i++)
             if (rig.keypointTransforms[i] != null) return true;
         return false;
     }
@@ -837,26 +1201,95 @@ public class MultiViewRecorder : MonoBehaviour
         return dst;
     }
 
-    static void DrawOverlay(byte[] buf, int w, int h, Vector2[] pts, bool[] vis,
-                            int pointR, int lineT, bool drawSkel)
+    static Color32[] GetKeypointColors(SkeletonFormat format, int keypointCount)
     {
-        if (drawSkel)
+        // Return a color array for visualization
+        var colors = new Color32[keypointCount];
+        
+        // Right side (orange), Left side (green), Head (blue)
+        for (int i = 0; i < keypointCount; i++)
         {
-            for (int s = 0; s < Skeleton.GetLength(0); s++)
+            // Default: orange for most points
+            colors[i] = new Color32(255, 128, 0, 255);
+        }
+
+        // Format-specific color assignments
+        switch (format)
+        {
+            case SkeletonFormat.AIC:
+                // Right shoulder-elbow-wrist (0-2): orange
+                // Left shoulder-elbow-wrist (3-5): green
+                // Right hip-knee-ankle (6-8): orange
+                // Left hip-knee-ankle (9-11): green
+                // Head top (12): blue, Neck (13): blue
+                for (int i = 3; i <= 5; i++) colors[i] = new Color32(0, 255, 0, 255);
+                for (int i = 9; i <= 11; i++) colors[i] = new Color32(0, 255, 0, 255);
+                colors[12] = new Color32(51, 153, 255, 255);
+                colors[13] = new Color32(51, 153, 255, 255);
+                break;
+
+            case SkeletonFormat.COCO:
+                // nose (0): blue, eyes & ears (1-4): blue
+                // Right shoulder-elbow-wrist (6,8,10): orange
+                // Left shoulder-elbow-wrist (5,7,9): green
+                // Right hip-knee-ankle (12,14,16): orange
+                // Left hip-knee-ankle (11,13,15): green
+                for (int i = 0; i <= 4; i++) colors[i] = new Color32(51, 153, 255, 255);
+                for (int i = 5; i <= 7; i++) colors[i] = i % 2 == 1 ? new Color32(0, 255, 0, 255) : new Color32(255, 128, 0, 255);
+                for (int i = 8; i <= 10; i++) colors[i] = new Color32(255, 128, 0, 255);
+                for (int i = 11; i <= 16; i++) colors[i] = i % 2 == 1 ? new Color32(0, 255, 0, 255) : new Color32(255, 128, 0, 255);
+                break;
+
+            case SkeletonFormat.MPII:
+                // Right leg (0-2): orange, Left leg (3-5): green
+                // Pelvis (6): yellow, Thorax (7): yellow, Upper_neck (8): blue, Head (9): blue
+                // Right arm (10-12): orange, Left arm (13-15): green
+                for (int i = 3; i <= 5; i++) colors[i] = new Color32(0, 255, 0, 255);
+                colors[6] = new Color32(255, 255, 0, 255);
+                colors[7] = new Color32(255, 255, 0, 255);
+                colors[8] = new Color32(51, 153, 255, 255);
+                colors[9] = new Color32(51, 153, 255, 255);
+                for (int i = 13; i <= 15; i++) colors[i] = new Color32(0, 255, 0, 255);
+                break;
+
+            case SkeletonFormat.CrowdPose:
+                // Left shoulder-elbow-wrist (0,2,4): green
+                // Right shoulder-elbow-wrist (1,3,5): orange
+                // Left hip-knee-ankle (6,8,10): green
+                // Right hip-knee-ankle (7,9,11): orange
+                // Head (12): blue, Neck (13): blue
+                for (int i = 0; i <= 5; i++) colors[i] = i % 2 == 0 ? new Color32(0, 255, 0, 255) : new Color32(255, 128, 0, 255);
+                for (int i = 6; i <= 11; i++) colors[i] = i % 2 == 0 ? new Color32(0, 255, 0, 255) : new Color32(255, 128, 0, 255);
+                colors[12] = new Color32(51, 153, 255, 255);
+                colors[13] = new Color32(51, 153, 255, 255);
+                break;
+        }
+
+        return colors;
+    }
+
+    static void DrawOverlay(byte[] buf, int w, int h, Vector2[] pts, bool[] vis,
+                            int pointR, int lineT, bool drawSkel,
+                            SkeletonFormatDef format, Color32[] colors)
+    {
+        if (drawSkel && format.skeleton != null)
+        {
+            for (int s = 0; s < format.skeleton.GetLength(0); s++)
             {
-                int a = Skeleton[s, 0];
-                int b = Skeleton[s, 1];
+                int a = format.skeleton[s, 0];
+                int b = format.skeleton[s, 1];
+                if (a < 0 || a >= vis.Length || b < 0 || b >= vis.Length) continue;
                 if (!vis[a] || !vis[b]) continue;
-                Color32 ca = keypointColors[a], cb = keypointColors[b];
+                Color32 ca = colors[a], cb = colors[b];
                 Color32 cc = new Color32((byte)((ca.r + cb.r) / 2), (byte)((ca.g + cb.g) / 2), (byte)((ca.b + cb.b) / 2), 255);
                 DrawLine(buf, w, h, Mathf.RoundToInt(pts[a].x), Mathf.RoundToInt(pts[a].y),
                                     Mathf.RoundToInt(pts[b].x), Mathf.RoundToInt(pts[b].y), lineT, cc);
             }
         }
-        for (int i = 0; i < KP_COUNT; i++)
+        for (int i = 0; i < pts.Length; i++)
         {
-            if (!vis[i]) continue;
-            DrawFilledCircle(buf, w, h, Mathf.RoundToInt(pts[i].x), Mathf.RoundToInt(pts[i].y), pointR, keypointColors[i]);
+            if (!vis[i] || i >= colors.Length) continue;
+            DrawFilledCircle(buf, w, h, Mathf.RoundToInt(pts[i].x), Mathf.RoundToInt(pts[i].y), pointR, colors[i]);
         }
     }
 
@@ -913,6 +1346,12 @@ public class MultiViewRecorder : MonoBehaviour
     {
         int slotCount = slots.Count;
         int personCount = worldPos.Length;
+        
+        // Get format from the first rig
+        SkeletonFormatDef format = personCount > 0 && rigs.Count > 0 ? 
+            GetSkeletonFormat(rigs[0].format) : GetSkeletonFormat(skeletonFormat);
+        int kpCount = personCount > 0 && rigs.Count > 0 ? rigs[0].keypointCount : GetKeypointCount(skeletonFormat);
+        
         var sb = new StringBuilder(8192 + slotCount * personCount * 1024);
 
         sb.Append("  {");
@@ -960,11 +1399,11 @@ public class MultiViewRecorder : MonoBehaviour
             sb.Append("\n        \"person_index\": ").Append(p).Append(",");
             sb.Append("\n        \"avatar_name\": \"").Append(rigs[p].animator.name).Append("\",");
             sb.Append("\n        \"keypoints\": [");
-            for (int k = 0; k < KP_COUNT; k++)
+            for (int k = 0; k < kpCount; k++)
             {
                 sb.Append(k == 0 ? "\n          " : ",\n          ");
                 sb.Append("{ \"id\": ").Append(k);
-                sb.Append(", \"name\": \"").Append(AicKeypointNames[k]).Append("\"");
+                sb.Append(", \"name\": \"").Append(format.keypointNames[k]).Append("\"");
                 sb.Append(", \"position_in_world\": ").Append(V3(worldPos[p][k]));
                 sb.Append(", \"rotation_in_world\": ").Append(Q(worldRot[p][k]));
                 sb.Append(", \"position_in_local\": ").Append(V3(localPos[p][k]));
@@ -1068,25 +1507,28 @@ public class MultiViewRecorder : MonoBehaviour
         jsonWriter.NewLine = "\n";
         jsonFirstFrame = true;
 
+        SkeletonFormatDef format = GetSkeletonFormat(skeletonFormat);
+        string datasetName = skeletonFormat.ToString().ToLower();
+
         jsonWriter.Write("{\n");
-        jsonWriter.Write("  \"dataset\": \"aic\",\n");
+        jsonWriter.Write($"  \"dataset\": \"{datasetName}\",\n");
         jsonWriter.Write("  \"multi_view\": true,\n");
         jsonWriter.Write("  \"coordinate_convention\": { \"image_origin\": \"top_left\", \"unity_screen_origin\": \"bottom_left\", \"world\": \"unity_left_handed_y_up\", \"camera_opencv\": \"x_right_y_down_z_forward_meters\" },\n");
         jsonWriter.Write("  \"keypoint_names\": [");
-        for (int i = 0; i < AicKeypointNames.Length; i++)
+        for (int i = 0; i < format.keypointNames.Length; i++)
         {
             if (i > 0) jsonWriter.Write(",");
-            jsonWriter.Write("\""); jsonWriter.Write(AicKeypointNames[i]); jsonWriter.Write("\"");
+            jsonWriter.Write("\""); jsonWriter.Write(format.keypointNames[i]); jsonWriter.Write("\"");
         }
         jsonWriter.Write("],\n");
         jsonWriter.Write("  \"skeleton\": [");
-        for (int i = 0; i < Skeleton.GetLength(0); i++)
+        for (int i = 0; i < format.skeleton.GetLength(0); i++)
         {
             if (i > 0) jsonWriter.Write(",");
             jsonWriter.Write("[");
-            jsonWriter.Write(Skeleton[i, 0].ToString(CultureInfo.InvariantCulture));
+            jsonWriter.Write(format.skeleton[i, 0].ToString(CultureInfo.InvariantCulture));
             jsonWriter.Write(",");
-            jsonWriter.Write(Skeleton[i, 1].ToString(CultureInfo.InvariantCulture));
+            jsonWriter.Write(format.skeleton[i, 1].ToString(CultureInfo.InvariantCulture));
             jsonWriter.Write("]");
         }
         jsonWriter.Write("],\n");
