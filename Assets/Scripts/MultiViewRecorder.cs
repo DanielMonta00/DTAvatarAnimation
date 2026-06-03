@@ -289,6 +289,16 @@ public class MultiViewRecorder : MonoBehaviour
     [Header("Subject heuristic")]
     [Tooltip("Distance in meters along Head bone's up axis from Head origin to the top of the skull.")]
     public float headTopUpOffset = 0.14f;
+    [Tooltip("Head-local offset for nose when no Nose bone is found on the avatar.")]
+    public Vector3 noseHeadOffset    = new Vector3( 0f,    0.08f, 0.09f);
+    [Tooltip("Head-local offset for left eye when no LeftEye bone is found.")]
+    public Vector3 leftEyeHeadOffset  = new Vector3( 0f,0f,0f);
+    [Tooltip("Head-local offset for right eye when no RightEye bone is found.")]
+    public Vector3 rightEyeHeadOffset = new Vector3(0f,0f,0f);
+    [Tooltip("Head-local offset for left ear when no LeftEar bone is found.")]
+    public Vector3 leftEarHeadOffset  = new Vector3( 0.09f, 0.08f, 0f);
+    [Tooltip("Head-local offset for right ear when no RightEar bone is found.")]
+    public Vector3 rightEarHeadOffset = new Vector3(-0.09f, 0.08f, 0f);
 
     [Header("Session")]
     public string outputFolder = "Recordings";
@@ -327,7 +337,7 @@ public class MultiViewRecorder : MonoBehaviour
     public bool drawSkeleton = true;
     public Color bboxVisColor = new Color(1f, 1f, 0f, 1f);
 
-    enum KpMode { Bone, HeadTopOffset, MidShoulder }
+    enum KpMode { Bone, HeadTopOffset, MidShoulder, HeadOffset }
 
     class AvatarRig
     {
@@ -336,6 +346,7 @@ public class MultiViewRecorder : MonoBehaviour
         public int keypointCount;
         public Transform[] keypointTransforms;
         public KpMode[] keypointModes;
+        public Vector3[] keypointLocalOffsets;  // used by KpMode.HeadOffset
         public Transform leftShoulderBone;
         public Transform rightShoulderBone;
         public bool bonesResolved;
@@ -346,6 +357,7 @@ public class MultiViewRecorder : MonoBehaviour
             this.keypointCount = kpCount;
             this.keypointTransforms = new Transform[kpCount];
             this.keypointModes = new KpMode[kpCount];
+            this.keypointLocalOffsets = new Vector3[kpCount];
             this.bonesResolved = false;
         }
     }
@@ -482,7 +494,7 @@ public class MultiViewRecorder : MonoBehaviour
 
         // Session folder.
         sessionPath = Path.Combine(Application.dataPath, "..", outputFolder,
-            sessionName + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss"));
+            sessionName + "_" + skeletonFormat.ToString() + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss"));
         Directory.CreateDirectory(sessionPath);
 
         // Per-camera setup.
@@ -911,14 +923,31 @@ public class MultiViewRecorder : MonoBehaviour
 
     void ResolveCOCORig(Animator a, bool isHumanoid, AvatarRig rig, SkeletonFormatDef format, Transform head, Transform neck)
     {
-        // 0: nose
-        rig.keypointTransforms[0]  = ResolveBone(a, isHumanoid, HumanBodyBones.Head, format.boneNameNose);
-        // 1: left_eye, 2: right_eye
-        rig.keypointTransforms[1]  = ResolveBone(a, isHumanoid, HumanBodyBones.Head, format.boneNameLeftEye);
-        rig.keypointTransforms[2]  = ResolveBone(a, isHumanoid, HumanBodyBones.Head, format.boneNameRightEye);
-        // 3: left_ear, 4: right_ear
-        rig.keypointTransforms[3]  = ResolveBone(a, isHumanoid, HumanBodyBones.Head, format.boneNameLeftEar);
-        rig.keypointTransforms[4]  = ResolveBone(a, isHumanoid, HumanBodyBones.Head, format.boneNameRightEar);
+        // 0: nose — no HumanBodyBones equivalent; offset from Head as fallback
+        Transform noseBone = FindBoneByName(a.transform, format.boneNameNose);
+        if (noseBone != null) { rig.keypointTransforms[0] = noseBone; }
+        else if (head != null) { rig.keypointTransforms[0] = head; rig.keypointModes[0] = KpMode.HeadOffset; rig.keypointLocalOffsets[0] = noseHeadOffset; }
+
+        // 1: left_eye — HumanBodyBones.LeftEye on humanoid rigs; offset fallback
+        Transform leftEyeBone = ResolveBone(a, isHumanoid, HumanBodyBones.LeftEye, format.boneNameLeftEye);
+        if (leftEyeBone != null) { rig.keypointTransforms[1] = leftEyeBone; }
+        else if (head != null) { rig.keypointTransforms[1] = head; rig.keypointModes[1] = KpMode.HeadOffset; rig.keypointLocalOffsets[1] = leftEyeHeadOffset; }
+
+        // 2: right_eye — HumanBodyBones.RightEye on humanoid rigs; offset fallback
+        Transform rightEyeBone = ResolveBone(a, isHumanoid, HumanBodyBones.RightEye, format.boneNameRightEye);
+        if (rightEyeBone != null) { rig.keypointTransforms[2] = rightEyeBone; }
+        else if (head != null) { rig.keypointTransforms[2] = head; rig.keypointModes[2] = KpMode.HeadOffset; rig.keypointLocalOffsets[2] = rightEyeHeadOffset; }
+
+        // 3: left_ear — no HumanBodyBones equivalent; offset from Head as fallback
+        Transform leftEarBone = FindBoneByName(a.transform, format.boneNameLeftEar);
+        if (leftEarBone != null) { rig.keypointTransforms[3] = leftEarBone; }
+        else if (head != null) { rig.keypointTransforms[3] = head; rig.keypointModes[3] = KpMode.HeadOffset; rig.keypointLocalOffsets[3] = leftEarHeadOffset; }
+
+        // 4: right_ear — no HumanBodyBones equivalent; offset from Head as fallback
+        Transform rightEarBone = FindBoneByName(a.transform, format.boneNameRightEar);
+        if (rightEarBone != null) { rig.keypointTransforms[4] = rightEarBone; }
+        else if (head != null) { rig.keypointTransforms[4] = head; rig.keypointModes[4] = KpMode.HeadOffset; rig.keypointLocalOffsets[4] = rightEarHeadOffset; }
+
         // 5: left_shoulder, 6: right_shoulder
         rig.keypointTransforms[5]  = rig.leftShoulderBone;
         rig.keypointTransforms[6]  = rig.rightShoulderBone;
@@ -1068,6 +1097,7 @@ public class MultiViewRecorder : MonoBehaviour
         switch (rig.keypointModes[i])
         {
             case KpMode.HeadTopOffset: return rig.keypointTransforms[i] != null;
+            case KpMode.HeadOffset:    return rig.keypointTransforms[i] != null;
             case KpMode.MidShoulder:   return rig.leftShoulderBone != null && rig.rightShoulderBone != null;
             default:                   return rig.keypointTransforms[i] != null;
         }
@@ -1088,6 +1118,11 @@ public class MultiViewRecorder : MonoBehaviour
             {
                 Transform t = rig.keypointTransforms[i];
                 return t != null ? t.position + t.up * headTopUpOffset : Vector3.zero;
+            }
+            case KpMode.HeadOffset:
+            {
+                Transform t = rig.keypointTransforms[i];
+                return t != null ? t.TransformPoint(rig.keypointLocalOffsets[i]) : Vector3.zero;
             }
             case KpMode.MidShoulder:
             {
