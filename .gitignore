@@ -29,4 +29,7 @@ Thumbs.db
 UnityKeyLocal
 UnityKeyLocal.pub
 
+
+
 .gitignore
+Assets/AvatarAnimation/BlenderModel.blend1
