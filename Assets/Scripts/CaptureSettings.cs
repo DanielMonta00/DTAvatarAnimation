@@ -1,8 +1,6 @@
 using UnityEngine;
 
-// Shared enums + helper for the recorder family. Kept tiny and self-contained
-// so RgbImageRecorder, KeypointsRecorder, RecordingSession, and
-// MultiViewRecorder can all reference the same options.
+// Shared enums + helper for MultiViewRecorder. Kept tiny and self-contained.
 
 public enum CaptureImageFormat
 {

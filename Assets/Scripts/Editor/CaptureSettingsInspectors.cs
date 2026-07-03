@@ -3,11 +3,11 @@ using UnityEditor;
 using UnityEngine;
 
 // Hides customWidth/customHeight unless captureResolution == Custom on
-// RecordingSession and MultiViewRecorder. Everything else falls through to
-// the default Inspector layout.
+// MultiViewRecorder. Everything else falls through to the default Inspector
+// layout.
 
-[CustomEditor(typeof(RecordingSession))]
-public class RecordingSessionEditor : Editor
+[CustomEditor(typeof(MultiViewRecorder))]
+public class MultiViewRecorderEditor : Editor
 {
     public override void OnInspectorGUI()
     {
@@ -42,15 +42,6 @@ public class RecordingSessionEditor : Editor
             EditorGUILayout.PropertyField(prop, true);
         }
         so.ApplyModifiedProperties();
-    }
-}
-
-[CustomEditor(typeof(MultiViewRecorder))]
-public class MultiViewRecorderEditor : Editor
-{
-    public override void OnInspectorGUI()
-    {
-        RecordingSessionEditor.DrawWithConditionalCustomSize(serializedObject, "captureResolution");
     }
 }
 #endif
