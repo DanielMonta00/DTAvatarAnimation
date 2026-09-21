@@ -18,6 +18,11 @@
 *.userprefs
 *.prefab
 *.prefab.meta
+*.meta
+*.json
+*.slnx
+*.unity
+*.mat
 .vs/
 .idea/
 .vscode/
@@ -35,3 +40,35 @@ UnityKeyLocal.pub
 Assets/AvatarAnimation/BlenderModel.blend1
 Assets/AvatarAnimation/BlenderModel.blend1.meta
 Assets\AvatarAnimation\BlenderModel.blend1.meta"
+Assets/CDPRKinematics/
+Assets/CDPRKinematics.meta
+Assets/_JENII/
+Assets/_Recovery/
+Trajectories/
+
+# Embedded package pulled in when the URDF importer was added (vendored, not authored here)
+/Packages/com.unity.probuilder/
+
+# CDPR robotics scene assets - meshes, textures, materials (the code lives in Assets/Scripts/CDPR)
+/Assets/CDPR/
+/Assets/CDPR.meta
+
+# Rokoko mocap plugin import (third-party)
+/Assets/Rokoko/
+/Assets/Rokoko.meta
+
+# Blender working file
+Assets/AvatarAnimation/Schema.blend
+Assets/AvatarAnimation/Schema.blend.meta
+Assets/AvatarAnimation/Schema.blend1
+Assets/AvatarAnimation/Schema.blend1.meta
+DTAvatarAnimation.slnx
+
+
+Assets/_JENII/Materials/UFP/FESTO/02_Bronze.mat
+Assets/_JENII/Scenes/CESI_UFP_Salles.unity
+Assets/AvatarAnimation/Materials/AvatarPeteWalkingInPlace-Ch17_hair.mat
+Assets/ENV/UFP/Models/FESTO_enveloppe_V2.fbx.meta
+Packages/manifest.json
+Packages/packages-lock.json
+ProjectSettings/Packages/com.unity.probuilder/Settings.json
