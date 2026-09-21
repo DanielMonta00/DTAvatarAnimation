@@ -73,3 +73,28 @@ Packages/manifest.json
 Packages/packages-lock.json
 ProjectSettings/Packages/com.unity.probuilder/Settings.json
 DTAvatarAnimation.slnx
+Assets/AvatarAnimation/PeteCharacter.fbx
+Assets/AvatarAnimation/PeteCharacter.controller
+Assets/AvatarAnimation/rokoko_skeleton_test1.anim
+Assets/Animations/RokokoBakes/Pete2Controller.controller
+Assets/Animations/RokokoBakes/PeteCharacter_rokoko_skeleton 1.anim
+Assets/Animations/RokokoBakes/PeteCharacter_rokoko_skeleton.anim
+Assets/AvatarAnimation/clip 1.anim
+Assets/AvatarAnimation/clip.anim
+Assets/AvatarAnimation/FlippingSwitch.anim
+Assets/AvatarAnimation/mixamo.com.anim
+Assets/AvatarAnimation/Recordin1_2.fbx
+Assets/AvatarAnimation/Recordin1.fbx
+Assets/AvatarAnimation/test01_20260921_162236.fbx
+Assets/AvatarAnimation/test01_20260921_163800.fbx
+Assets/AvatarAnimation/test1pete.anim
+Assets/AvatarAnimation/PeteCharacter.fbm/Ch17_1001_Diffuse.png
+Assets/AvatarAnimation/PeteCharacter.fbm/Ch17_1001_Glossiness.png
+Assets/AvatarAnimation/PeteCharacter.fbm/Ch17_1001_Normal.png
+Assets/AvatarAnimation/PeteCharacter.fbm/Ch17_1001_Specular.png
+Assets/AvatarAnimation/PeteCharacter.fbm/Ch17_1002_Diffuse.png
+Assets/AvatarAnimation/PeteCharacter.fbm/Ch17_1002_Normal.png
+Assets/Editor/RokokoJsonlBaker.cs
+Assets/AvatarAnimation/FlippingSwitch.anim
+Assets/Animations/RokokoBakes/PeteCharacter_rokoko_skeleton 2.anim
+Assets/AvatarAnimation/FlippingSwitch.anim
