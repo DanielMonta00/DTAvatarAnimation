@@ -23,6 +23,7 @@
 *.slnx
 *.unity
 *.mat
+*.anim.meta
 .vs/
 .idea/
 .vscode/
@@ -63,7 +64,8 @@ Assets/AvatarAnimation/Schema.blend.meta
 Assets/AvatarAnimation/Schema.blend1
 Assets/AvatarAnimation/Schema.blend1.meta
 DTAvatarAnimation.slnx
-
+Assets/AvatarAnimation/
+Assests/Animations/
 
 Assets/_JENII/Materials/UFP/FESTO/02_Bronze.mat
 Assets/_JENII/Scenes/CESI_UFP_Salles.unity
@@ -98,3 +100,201 @@ Assets/Editor/RokokoJsonlBaker.cs
 Assets/AvatarAnimation/FlippingSwitch.anim
 Assets/Animations/RokokoBakes/PeteCharacter_rokoko_skeleton 2.anim
 Assets/AvatarAnimation/FlippingSwitch.anim
+Assets/Animations/AnimationControllers/Pete2Controller.controller
+Assets/Animations/AnimationControllers/PeteCharacter.controller
+Assets/Animations/AnimationControllers/WalkingController.controller
+Assets/Animations/AnimationControllers/WalkingControllerRetarget.controller
+Assets/Animations/AnimationControllers/WorkingController.controller
+Assets/Animations/LibraryAnimations/FlippingSwitch.anim
+Assets/Animations/LibraryAnimations/mixamo.com.anim
+Assets/Animations/LibraryAnimations/PickingUp.anim
+Assets/Animations/LibraryAnimations/retargetWalking.anim
+Assets/Animations/LibraryAnimations/Shoved.anim
+Assets/Animations/LibraryAnimations/SittingAndPointing.anim
+Assets/Animations/LibraryAnimations/Walking.anim
+Assets/Animations/LibraryAnimations/WalkingAround.anim
+Assets/Animations/LibraryAnimations/WorkingOnDevice.anim
+Assets/Animations/RecordedAnimations/clip 1.anim
+Assets/Animations/RecordedAnimations/clip.anim
+Assets/Animations/RecordedAnimations/rokoko_skeleton_test1.anim
+Assets/Animations/RecordedAnimations/test1pete.anim
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace 1.fbm.meta
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace 1.fbx
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace 1.fbx.meta
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace.fbm.meta
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace.fbx
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace.fbx.meta
+Assets/AvatarAnimation/BlenderModel.blend1.meta
+Assets/AvatarAnimation/BlenderModel.fbx
+Assets/AvatarAnimation/BlenderModel.fbx.meta
+Assets/AvatarAnimation/Ch17_nonPBR.fbm.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingAround.fbm.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingInPlace.fbm.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingLatest.fbm.meta
+Assets/AvatarAnimation/FlippingSwitch.anim
+Assets/AvatarAnimation/FlippingSwitch.anim.meta
+Assets/AvatarAnimation/ImportExport.fbm.meta
+Assets/AvatarAnimation/Materials.meta
+Assets/AvatarAnimation/Mixamo+Eyes.ht
+Assets/AvatarAnimation/Mixamo+Eyes.ht.meta
+Assets/AvatarAnimation/Picking Up.fbx
+Assets/AvatarAnimation/Picking Up.fbx.meta
+Assets/AvatarAnimation/PickingUp.anim
+Assets/AvatarAnimation/PickingUp.anim.meta
+Assets/AvatarAnimation/Pilot Flips Switches.fbx
+Assets/AvatarAnimation/Pilot Flips Switches.fbx.meta
+Assets/AvatarAnimation/retargetWalking.anim
+Assets/AvatarAnimation/retargetWalking.anim.meta
+Assets/AvatarAnimation/Shoved.anim
+Assets/AvatarAnimation/Shoved.anim.meta
+Assets/AvatarAnimation/Shoved.fbx
+Assets/AvatarAnimation/Shoved.fbx.meta
+Assets/AvatarAnimation/Sitting And Pointing.fbx
+Assets/AvatarAnimation/Sitting And Pointing.fbx.meta
+Assets/AvatarAnimation/SittingAndPointing.anim
+Assets/AvatarAnimation/SittingAndPointing.anim.meta
+Assets/AvatarAnimation/UntitledFix.fbm.meta
+Assets/AvatarAnimation/Walking.anim
+Assets/AvatarAnimation/Walking.anim.meta
+Assets/AvatarAnimation/WalkingAround.anim
+Assets/AvatarAnimation/WalkingAround.anim.meta
+Assets/AvatarAnimation/WalkingController.controller
+Assets/AvatarAnimation/WalkingController.controller.meta
+Assets/AvatarAnimation/WalkingControllerRetarget.controller
+Assets/AvatarAnimation/WalkingControllerRetarget.controller.meta
+Assets/AvatarAnimation/WorkingController.controller
+Assets/AvatarAnimation/WorkingController.controller.meta
+Assets/AvatarAnimation/WorkingOnDevice.anim
+Assets/AvatarAnimation/WorkingOnDevice.anim.meta
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace 1.fbm/Ch17_1001_Diffuse.png
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace 1.fbm/Ch17_1001_Diffuse.png.meta
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace 1.fbm/Ch17_1001_Glossiness.png
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace 1.fbm/Ch17_1001_Glossiness.png.meta
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace 1.fbm/Ch17_1001_Normal.png
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace 1.fbm/Ch17_1001_Normal.png.meta
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace 1.fbm/Ch17_1001_Specular.png
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace 1.fbm/Ch17_1001_Specular.png.meta
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace 1.fbm/Ch17_1002_Diffuse.png
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace 1.fbm/Ch17_1002_Diffuse.png.meta
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace 1.fbm/Ch17_1002_Normal.png
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace 1.fbm/Ch17_1002_Normal.png.meta
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace.fbm/Ch17_1001_Diffuse.png
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace.fbm/Ch17_1001_Diffuse.png.meta
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace.fbm/Ch17_1001_Glossiness.png
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace.fbm/Ch17_1001_Glossiness.png.meta
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace.fbm/Ch17_1001_Normal.png
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace.fbm/Ch17_1001_Normal.png.meta
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace.fbm/Ch17_1001_Specular.png
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace.fbm/Ch17_1001_Specular.png.meta
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace.fbm/Ch17_1002_Diffuse.png
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace.fbm/Ch17_1002_Diffuse.png.meta
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace.fbm/Ch17_1002_Normal.png
+Assets/AvatarAnimation/AvatarPeteWalkingInPlace.fbm/Ch17_1002_Normal.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR.fbm/Ch17_1001_Diffuse.png
+Assets/AvatarAnimation/Ch17_nonPBR.fbm/Ch17_1001_Diffuse.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR.fbm/Ch17_1001_Glossiness.png
+Assets/AvatarAnimation/Ch17_nonPBR.fbm/Ch17_1001_Glossiness.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR.fbm/Ch17_1001_Normal.png
+Assets/AvatarAnimation/Ch17_nonPBR.fbm/Ch17_1001_Normal.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR.fbm/Ch17_1001_Specular.png
+Assets/AvatarAnimation/Ch17_nonPBR.fbm/Ch17_1001_Specular.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR.fbm/Ch17_1002_Diffuse.png
+Assets/AvatarAnimation/Ch17_nonPBR.fbm/Ch17_1002_Diffuse.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR.fbm/Ch17_1002_Normal.png
+Assets/AvatarAnimation/Ch17_nonPBR.fbm/Ch17_1002_Normal.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingAround.fbm/Ch17_1001_Diffuse.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingAround.fbm/Ch17_1001_Diffuse.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingAround.fbm/Ch17_1001_Glossiness.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingAround.fbm/Ch17_1001_Glossiness.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingAround.fbm/Ch17_1001_Normal.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingAround.fbm/Ch17_1001_Normal.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingAround.fbm/Ch17_1001_Specular.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingAround.fbm/Ch17_1001_Specular.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingAround.fbm/Ch17_1002_Diffuse.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingAround.fbm/Ch17_1002_Diffuse.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingAround.fbm/Ch17_1002_Normal.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingAround.fbm/Ch17_1002_Normal.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingInPlace.fbm/Ch17_1001_Diffuse.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingInPlace.fbm/Ch17_1001_Diffuse.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingInPlace.fbm/Ch17_1001_Glossiness.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingInPlace.fbm/Ch17_1001_Glossiness.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingInPlace.fbm/Ch17_1001_Normal.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingInPlace.fbm/Ch17_1001_Normal.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingInPlace.fbm/Ch17_1001_Specular.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingInPlace.fbm/Ch17_1001_Specular.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingInPlace.fbm/Ch17_1002_Diffuse.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingInPlace.fbm/Ch17_1002_Diffuse.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingInPlace.fbm/Ch17_1002_Normal.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingInPlace.fbm/Ch17_1002_Normal.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingLatest.fbm/Ch17_1001_Diffuse.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingLatest.fbm/Ch17_1001_Diffuse.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingLatest.fbm/Ch17_1001_Glossiness.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingLatest.fbm/Ch17_1001_Glossiness.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingLatest.fbm/Ch17_1001_Normal.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingLatest.fbm/Ch17_1001_Normal.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingLatest.fbm/Ch17_1001_Specular.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingLatest.fbm/Ch17_1001_Specular.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingLatest.fbm/Ch17_1002_Diffuse.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingLatest.fbm/Ch17_1002_Diffuse.png.meta
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingLatest.fbm/Ch17_1002_Normal.png
+Assets/AvatarAnimation/Ch17_nonPBR@WalkingLatest.fbm/Ch17_1002_Normal.png.meta
+Assets/AvatarAnimation/ImportExport.fbm/Ch17_1001_Diffuse.png
+Assets/AvatarAnimation/ImportExport.fbm/Ch17_1001_Diffuse.png.meta
+Assets/AvatarAnimation/ImportExport.fbm/Ch17_1001_Glossiness.png
+Assets/AvatarAnimation/ImportExport.fbm/Ch17_1001_Glossiness.png.meta
+Assets/AvatarAnimation/ImportExport.fbm/Ch17_1001_Normal.png
+Assets/AvatarAnimation/ImportExport.fbm/Ch17_1001_Normal.png.meta
+Assets/AvatarAnimation/ImportExport.fbm/Ch17_1001_Specular.png
+Assets/AvatarAnimation/ImportExport.fbm/Ch17_1001_Specular.png.meta
+Assets/AvatarAnimation/ImportExport.fbm/Ch17_1002_Diffuse.png
+Assets/AvatarAnimation/ImportExport.fbm/Ch17_1002_Diffuse.png.meta
+Assets/AvatarAnimation/ImportExport.fbm/Ch17_1002_Normal.png
+Assets/AvatarAnimation/ImportExport.fbm/Ch17_1002_Normal.png.meta
+Assets/AvatarAnimation/Materials/AvatarPeteWalkingInPlace 1-Ch17_body.mat
+Assets/AvatarAnimation/Materials/AvatarPeteWalkingInPlace 1-Ch17_body.mat.meta
+Assets/AvatarAnimation/Materials/AvatarPeteWalkingInPlace 1-Ch17_hair.mat
+Assets/AvatarAnimation/Materials/AvatarPeteWalkingInPlace 1-Ch17_hair.mat.meta
+Assets/AvatarAnimation/Materials/AvatarPeteWalkingInPlace-Ch17_body.mat
+Assets/AvatarAnimation/Materials/AvatarPeteWalkingInPlace-Ch17_body.mat.meta
+Assets/AvatarAnimation/Materials/AvatarPeteWalkingInPlace-Ch17_hair.mat
+Assets/AvatarAnimation/Materials/AvatarPeteWalkingInPlace-Ch17_hair.mat.meta
+Assets/AvatarAnimation/Materials/BlenderModel-Ch17_body.001.mat
+Assets/AvatarAnimation/Materials/BlenderModel-Ch17_body.001.mat.meta
+Assets/AvatarAnimation/Materials/BlenderModel-Ch17_hair.001.mat
+Assets/AvatarAnimation/Materials/BlenderModel-Ch17_hair.001.mat.meta
+Assets/AvatarAnimation/Materials/Ch17_1001_Diffuse.mat
+Assets/AvatarAnimation/Materials/Ch17_1001_Diffuse.mat.meta
+Assets/AvatarAnimation/Materials/Ch17_1002_Diffuse.mat
+Assets/AvatarAnimation/Materials/Ch17_1002_Diffuse.mat.meta
+Assets/AvatarAnimation/Materials/Ch17_body.mat
+Assets/AvatarAnimation/Materials/Ch17_body.mat.meta
+Assets/AvatarAnimation/Materials/Ch17_hair.mat
+Assets/AvatarAnimation/Materials/Ch17_hair.mat.meta
+Assets/AvatarAnimation/Materials/ImportExport-Ch17_body.001.mat
+Assets/AvatarAnimation/Materials/ImportExport-Ch17_body.001.mat.meta
+Assets/AvatarAnimation/Materials/ImportExport-Ch17_body.002.mat
+Assets/AvatarAnimation/Materials/ImportExport-Ch17_body.002.mat.meta
+Assets/AvatarAnimation/Materials/ImportExport-Ch17_body.003.mat
+Assets/AvatarAnimation/Materials/ImportExport-Ch17_body.003.mat.meta
+Assets/AvatarAnimation/Materials/ImportExport-Ch17_body.004.mat
+Assets/AvatarAnimation/Materials/ImportExport-Ch17_body.004.mat.meta
+Assets/AvatarAnimation/Materials/ImportExport-Ch17_hair.001.mat
+Assets/AvatarAnimation/Materials/ImportExport-Ch17_hair.001.mat.meta
+Assets/AvatarAnimation/Materials/ImportExport-Ch17_hair.002.mat
+Assets/AvatarAnimation/Materials/ImportExport-Ch17_hair.002.mat.meta
+Assets/AvatarAnimation/Materials/ImportExport-Ch17_hair.003.mat
+Assets/AvatarAnimation/Materials/ImportExport-Ch17_hair.003.mat.meta
+Assets/AvatarAnimation/Materials/ImportExport-Ch17_hair.004.mat
+Assets/AvatarAnimation/Materials/ImportExport-Ch17_hair.004.mat.meta
+Assets/AvatarAnimation/UntitledFix.fbm/Ch17_1001_Diffuse.png
+Assets/AvatarAnimation/UntitledFix.fbm/Ch17_1001_Diffuse.png.meta
+Assets/AvatarAnimation/UntitledFix.fbm/Ch17_1001_Glossiness.png
+Assets/AvatarAnimation/UntitledFix.fbm/Ch17_1001_Glossiness.png.meta
+Assets/AvatarAnimation/UntitledFix.fbm/Ch17_1001_Normal.png
+Assets/AvatarAnimation/UntitledFix.fbm/Ch17_1001_Normal.png.meta
+Assets/AvatarAnimation/UntitledFix.fbm/Ch17_1001_Specular.png
+Assets/AvatarAnimation/UntitledFix.fbm/Ch17_1001_Specular.png.meta
+Assets/AvatarAnimation/UntitledFix.fbm/Ch17_1002_Diffuse.png
+Assets/AvatarAnimation/UntitledFix.fbm/Ch17_1002_Diffuse.png.meta
+Assets/AvatarAnimation/UntitledFix.fbm/Ch17_1002_Normal.png
+Assets/AvatarAnimation/UntitledFix.fbm/Ch17_1002_Normal.png.meta
