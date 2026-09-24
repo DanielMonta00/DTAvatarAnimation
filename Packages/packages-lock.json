@@ -7,6 +7,14 @@
       "dependencies": {},
       "url": "https://packages.unity.com"
     },
+    "com.lineact.looper": {
+      "version": "file:C:/Users/vdmontanacuellar/Documents/Daniel/looper/com.lineact.looper",
+      "depth": 0,
+      "source": "local",
+      "dependencies": {
+        "com.unity.render-pipelines.universal": "17.3.0"
+      }
+    },
     "com.unity.ai.navigation": {
       "version": "2.0.11",
       "depth": 0,

@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using Rokoko.Core;
+using Rokoko.Helper;
 using Rokoko.Inputs;
 using UnityEditor;
 using UnityEngine;
@@ -38,6 +39,30 @@ public static class RokokoJsonlBaker
     }
 
     /// <summary>
+    /// Optional post-processing toggles layered on top of Actor.UpdateActor()'s own retargeting,
+    /// approximating Rokoko Studio Character-retargeting features this Actor-driven bake doesn't
+    /// have (see RokokoMocapBaker's Inspector for the matching checkboxes). Defaults leave the
+    /// bake byte-identical to plain Actor.UpdateActor() output.
+    /// </summary>
+    public struct BakeOptions
+    {
+        public bool twistRedistribution;
+        public float twistRedistributionAmount;
+        public bool aimForThumbs;
+    }
+
+    // (outer limb-segment twist muscle, inner limb-segment twist muscle) pairs Twist
+    // Redistribution moves a share of rotation between. Named by Unity's own HumanTrait.MuscleName
+    // strings rather than by index, since those are stable across Unity versions.
+    static readonly (string outer, string inner)[] TwistMuscleNamePairs =
+    {
+        ("Left Forearm Twist In-Out", "Left Arm Twist In-Out"),
+        ("Right Forearm Twist In-Out", "Right Arm Twist In-Out"),
+        ("Left Lower Leg Twist In-Out", "Left Upper Leg Twist In-Out"),
+        ("Right Lower Leg Twist In-Out", "Right Upper Leg Twist In-Out"),
+    };
+
+    /// <summary>
     /// Checks the preconditions UpdateActor()/HumanPoseHandler need. Returns null when
     /// the Actor is ready to bake, otherwise a user-facing message describing what's missing.
     /// </summary>
@@ -56,12 +81,12 @@ public static class RokokoJsonlBaker
     /// Runs BakeToClip, showing/clearing the progress bar and reporting the result --
     /// the shared "do it and tell the user what happened" wrapper.
     /// </summary>
-    public static void RunBake(Actor actor, string jsonlPath, string outPath)
+    public static void RunBake(Actor actor, string jsonlPath, string outPath, BakeOptions options = default)
     {
         int applied;
         try
         {
-            applied = BakeToClip(actor, jsonlPath, outPath);
+            applied = BakeToClip(actor, jsonlPath, outPath, options);
         }
         finally
         {
@@ -85,7 +110,7 @@ public static class RokokoJsonlBaker
     /// HumanPoseHandler, and writes a Humanoid AnimationClip asset to outClipPath.
     /// Returns the number of frames baked. Caller must call Validate(actor) first.
     /// </summary>
-    public static int BakeToClip(Actor actor, string jsonlPath, string outClipPath)
+    public static int BakeToClip(Actor actor, string jsonlPath, string outClipPath, BakeOptions options = default)
     {
         // Actor.UpdateActor() reads a private bone-rotation-offset cache that's normally
         // built in Actor.Awake() -- which only runs in Play Mode. This baker calls
@@ -95,6 +120,13 @@ public static class RokokoJsonlBaker
         // same private initializers it calls, via reflection, once before baking.
         InvokeActorPrivateMethod(actor, "InitializeAnimatorHumanBones");
         InvokeActorPrivateMethod(actor, "InitializeBoneOffsets");
+
+        // Resolved once, not per frame: looking up 8 names in a 95-entry array every frame is
+        // wasted work, and warning once here (instead of once per frame) keeps the Console readable
+        // if a Unity version ever renames one of these muscles.
+        List<(int outer, int inner)> twistMuscleIndices = null;
+        if (options.twistRedistribution)
+            twistMuscleIndices = ResolveTwistMuscleIndices();
 
         // Sample the Animator's posed muscle values each frame instead of recording raw
         // Transform curves (GameObjectRecorder), so the resulting clip is a real Humanoid
@@ -127,6 +159,7 @@ public static class RokokoJsonlBaker
 
         var poseHandler = new HumanPoseHandler(actor.animator.avatar, actor.animator.transform);
         var pose = new HumanPose();
+        Quaternion lastBodyRotation = Quaternion.identity;
 
         try
         {
@@ -165,6 +198,9 @@ public static class RokokoJsonlBaker
 
                 actor.UpdateActor(frame);
 
+                if (options.aimForThumbs)
+                    ApplyAimForThumbs(actor.animator, src.bones);
+
                 float dt = lastTs < 0f ? 1f / 30f : Mathf.Max(raw.studio_timestamp - lastTs, 1f / 240f);
                 if (applied > 0)
                     time += dt;
@@ -172,16 +208,31 @@ public static class RokokoJsonlBaker
 
                 poseHandler.GetHumanPose(ref pose);
 
+                if (twistMuscleIndices != null)
+                    ApplyTwistRedistribution(ref pose, twistMuscleIndices, options.twistRedistributionAmount);
+
                 for (int m = 0; m < muscleCount; m++)
                     muscleKeys[m].Add(new Keyframe(time, pose.muscles[m]));
 
                 rootTKeys[0].Add(new Keyframe(time, pose.bodyPosition.x));
                 rootTKeys[1].Add(new Keyframe(time, pose.bodyPosition.y));
                 rootTKeys[2].Add(new Keyframe(time, pose.bodyPosition.z));
-                rootQKeys[0].Add(new Keyframe(time, pose.bodyRotation.x));
-                rootQKeys[1].Add(new Keyframe(time, pose.bodyRotation.y));
-                rootQKeys[2].Add(new Keyframe(time, pose.bodyRotation.z));
-                rootQKeys[3].Add(new Keyframe(time, pose.bodyRotation.w));
+
+                // q and -q are the same rotation, but GetHumanPose gives no guarantee of a
+                // consistent sign frame to frame, and RootQ.x/y/z/w are stored as 4 independent
+                // curves -- a sign flip between two consecutive keyframes makes Unity interpolate
+                // through a large wrong swing before snapping back. Flipping the whole quaternion
+                // whenever it points away from the previous frame keeps every stored keyframe on
+                // the same side of that double-cover, so interpolation between them is continuous.
+                Quaternion bodyRotation = pose.bodyRotation;
+                if (applied > 0 && Quaternion.Dot(bodyRotation, lastBodyRotation) < 0f)
+                    bodyRotation = new Quaternion(-bodyRotation.x, -bodyRotation.y, -bodyRotation.z, -bodyRotation.w);
+                lastBodyRotation = bodyRotation;
+
+                rootQKeys[0].Add(new Keyframe(time, bodyRotation.x));
+                rootQKeys[1].Add(new Keyframe(time, bodyRotation.y));
+                rootQKeys[2].Add(new Keyframe(time, bodyRotation.z));
+                rootQKeys[3].Add(new Keyframe(time, bodyRotation.w));
 
                 applied++;
             }
@@ -202,21 +253,35 @@ public static class RokokoJsonlBaker
 
         var clip = new AnimationClip { name = Path.GetFileNameWithoutExtension(outClipPath) };
         for (int m = 0; m < muscleCount; m++)
-            clip.SetCurve("", typeof(Animator), HumanTrait.MuscleName[m], new AnimationCurve(muscleKeys[m].ToArray()));
+            clip.SetCurve("", typeof(Animator), HumanTrait.MuscleName[m], BuildSmoothedCurve(muscleKeys[m]));
 
         string[] rootTNames = { "RootT.x", "RootT.y", "RootT.z" };
         for (int a = 0; a < 3; a++)
-            clip.SetCurve("", typeof(Animator), rootTNames[a], new AnimationCurve(rootTKeys[a].ToArray()));
+            clip.SetCurve("", typeof(Animator), rootTNames[a], BuildSmoothedCurve(rootTKeys[a]));
 
         string[] rootQNames = { "RootQ.x", "RootQ.y", "RootQ.z", "RootQ.w" };
         for (int a = 0; a < 4; a++)
-            clip.SetCurve("", typeof(Animator), rootQNames[a], new AnimationCurve(rootQKeys[a].ToArray()));
+            clip.SetCurve("", typeof(Animator), rootQNames[a], BuildSmoothedCurve(rootQKeys[a]));
 
         AssetDatabase.CreateAsset(clip, outClipPath);
         AssetDatabase.SaveAssets();
         EditorGUIUtility.PingObject(clip);
 
         return applied;
+    }
+
+    // Every Keyframe pushed above defaults to a flat (zero) in/out tangent -- at ~30 keyframes
+    // per second that forces a separate ease-in/ease-out S-curve on every single segment of every
+    // curve, which reads as wobbly/jittery motion once played back, even though the underlying
+    // per-frame values (verified against the raw recording) are smooth. SmoothTangents recomputes
+    // each key's tangent from its neighbors (Catmull-Rom-like, matching the Curve editor's "Auto"
+    // tangent), removing the artifact without changing any of the sampled values themselves.
+    static AnimationCurve BuildSmoothedCurve(List<Keyframe> keys)
+    {
+        var curve = new AnimationCurve(keys.ToArray());
+        for (int k = 0; k < curve.length; k++)
+            curve.SmoothTangents(k, 0f);
+        return curve;
     }
 
     // Calls a private/protected no-arg instance method on Actor without modifying the
@@ -226,6 +291,80 @@ public static class RokokoJsonlBaker
         MethodInfo method = typeof(Actor).GetMethod(methodName,
             BindingFlags.NonPublic | BindingFlags.Instance);
         method?.Invoke(actor, null);
+    }
+
+    static List<(int outer, int inner)> ResolveTwistMuscleIndices()
+    {
+        var resolved = new List<(int outer, int inner)>();
+        foreach ((string outerName, string innerName) in TwistMuscleNamePairs)
+        {
+            int outerIdx = Array.IndexOf(HumanTrait.MuscleName, outerName);
+            int innerIdx = Array.IndexOf(HumanTrait.MuscleName, innerName);
+            if (outerIdx < 0 || innerIdx < 0)
+            {
+                Debug.LogWarning($"[Rokoko Bake] Twist Redistribution: couldn't find muscle "
+                    + $"\"{(outerIdx < 0 ? outerName : innerName)}\" in this Unity version's "
+                    + "HumanTrait.MuscleName -- skipping this limb.");
+                continue;
+            }
+            resolved.Add((outerIdx, innerIdx));
+        }
+        return resolved;
+    }
+
+    // Approximates Rokoko Studio's Roll Extraction: moves a share of each limb's outer-segment
+    // twist muscle (forearm/lower leg) back into its inner segment's twist muscle (upper arm/
+    // upper leg), so the whole limb absorbs a wrist/ankle twist instead of concentrating it at
+    // the outer joint alone. Runs on the already-sampled HumanPose in muscle space -- this baker
+    // writes muscle curves, not raw Transform curves (see BakeToClip's summary), so this can't
+    // reach mesh-level roll/twist helper bones the way Rokoko Studio's own Roll Extraction can;
+    // it only redistributes between the two twist DOFs Humanoid already models per limb.
+    static void ApplyTwistRedistribution(ref HumanPose pose, List<(int outer, int inner)> muscleIndices, float amount)
+    {
+        foreach ((int outerIdx, int innerIdx) in muscleIndices)
+        {
+            float transferred = pose.muscles[outerIdx] * amount;
+            pose.muscles[outerIdx] -= transferred;
+            pose.muscles[innerIdx] += transferred;
+        }
+    }
+
+    // Approximates Rokoko Studio's Use Aim For Thumbs: Actor.UpdateBone() only ever applies raw
+    // *rotation* to non-hip bones (Actor.cs's shouldUpdatePosition is true for Hips only), so the
+    // recording's position data for every other joint -- thumbs included -- is decoded into an
+    // ActorFrame but never used. This reuses that otherwise-discarded position data to nudge each
+    // thumb segment's already-retargeted rotation just enough that it points at the next recorded
+    // joint, rather than replacing Rokoko's own retargeted rotation outright.
+    static void ApplyAimForThumbs(Animator animator, BodyFrame bones)
+    {
+        ApplyAimForThumbSegment(animator, HumanBodyBones.LeftThumbProximal, HumanBodyBones.LeftThumbIntermediate,
+            bones.leftThumbProximal, bones.leftThumbMedial);
+        ApplyAimForThumbSegment(animator, HumanBodyBones.LeftThumbIntermediate, HumanBodyBones.LeftThumbDistal,
+            bones.leftThumbMedial, bones.leftThumbDistal);
+        ApplyAimForThumbSegment(animator, HumanBodyBones.RightThumbProximal, HumanBodyBones.RightThumbIntermediate,
+            bones.rightThumbProximal, bones.rightThumbMedial);
+        ApplyAimForThumbSegment(animator, HumanBodyBones.RightThumbIntermediate, HumanBodyBones.RightThumbDistal,
+            bones.rightThumbMedial, bones.rightThumbDistal);
+        // ThumbDistal has no further Humanoid-mapped bone to aim at (its recorded child is a
+        // fingertip, which isn't part of the Humanoid bone set), so it's left as Rokoko's own
+        // retargeted rotation -- two of each thumb's three segments get the aim correction.
+    }
+
+    static void ApplyAimForThumbSegment(Animator animator, HumanBodyBones bone, HumanBodyBones childBone,
+        ActorJointFrame rawThis, ActorJointFrame rawChild)
+    {
+        Transform boneTransform = animator.GetBoneTransform(bone);
+        Transform childTransform = animator.GetBoneTransform(childBone);
+        if (boneTransform == null || childTransform == null)
+            return;
+
+        Vector3 currentDir = childTransform.position - boneTransform.position;
+        Vector3 desiredDir = rawChild.position.ToVector3() - rawThis.position.ToVector3();
+        if (currentDir.sqrMagnitude < 1e-8f || desiredDir.sqrMagnitude < 1e-8f)
+            return;
+
+        Quaternion correction = Quaternion.FromToRotation(currentDir.normalized, desiredDir.normalized);
+        boneTransform.rotation = correction * boneTransform.rotation;
     }
 }
 #endif

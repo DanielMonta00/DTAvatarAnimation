@@ -24,6 +24,23 @@ public class RokokoMocapBaker : MonoBehaviour
 
     [Tooltip("Project folder the baked .anim clip is written into.")]
     public string outputFolder = "Assets/Animations/RokokoBakes";
+
+    [Header("Retargeting refinements (compare against Rokoko Studio's equivalents)")]
+    [Tooltip("Redistributes a share of each limb's outer-segment twist (forearm/lower leg) back "
+        + "into its inner segment (upper arm/upper leg) in the baked muscle curves, reducing "
+        + "over-twisted skin deformation at the wrist/ankle. Approximates Rokoko Studio's Roll "
+        + "Extraction option.")]
+    public bool twistRedistribution = false;
+
+    [Range(0f, 1f)]
+    [Tooltip("Share of outer-segment twist moved into the inner segment when Twist Redistribution is on.")]
+    public float twistRedistributionAmount = 0.5f;
+
+    [Tooltip("Aims each thumb segment at the next recorded joint position instead of copying the "
+        + "suit's raw segment rotation, using position data the recording already contains but "
+        + "Rokoko's own retargeting ignores for every bone except the hips. Approximates Rokoko "
+        + "Studio's Use Aim For Thumbs option.")]
+    public bool aimForThumbs = false;
 }
 
 #if UNITY_EDITOR
@@ -104,6 +121,14 @@ public class RokokoMocapBakerEditor : Editor
         }
 
         EditorGUILayout.Space();
+        EditorGUILayout.LabelField("Retargeting Refinements", EditorStyles.boldLabel);
+        EditorGUILayout.HelpBox(
+            "Optional post-processing on top of Rokoko's own retargeting, approximating features "
+            + "Rokoko Studio's Character retargeting has that this Actor-driven bake doesn't. Bake "
+            + "once with all of these off, then again with one on, to compare.", MessageType.None);
+        DrawRefinementToggles(baker, actor);
+
+        EditorGUILayout.Space();
         string blockReason = RokokoJsonlBaker.Validate(actor);
         if (blockReason == null && string.IsNullOrEmpty(baker.jsonlPath))
             blockReason = "Drop a .jsonl file above first.";
@@ -118,6 +143,50 @@ public class RokokoMocapBakerEditor : Editor
 
         if (GUI.changed)
             EditorUtility.SetDirty(baker);
+    }
+
+    void DrawRefinementToggles(RokokoMocapBaker baker, Actor actor)
+    {
+        EditorGUI.BeginChangeCheck();
+        bool hipLeveling = EditorGUILayout.ToggleLeft(
+            new GUIContent("Hip Height Leveling",
+                "Actor.adjustHipHeightBasedOnStudioActor -- levels the incoming hip height against "
+                + "this character's own leg length. Closest available equivalent to Rokoko Studio's "
+                + "Neck Shift option; this is a hip/root-level correction, not neck-specific."),
+            actor.adjustHipHeightBasedOnStudioActor);
+        if (EditorGUI.EndChangeCheck())
+        {
+            Undo.RecordObject(actor, "Toggle Hip Height Leveling");
+            actor.adjustHipHeightBasedOnStudioActor = hipLeveling;
+        }
+
+        EditorGUI.BeginChangeCheck();
+        bool twist = EditorGUILayout.ToggleLeft(
+            new GUIContent("Twist Redistribution", "Approximates Rokoko Studio's Roll Extraction option."),
+            baker.twistRedistribution);
+        float twistAmount = baker.twistRedistributionAmount;
+        if (twist)
+        {
+            EditorGUI.indentLevel++;
+            twistAmount = EditorGUILayout.Slider("Amount", twistAmount, 0f, 1f);
+            EditorGUI.indentLevel--;
+        }
+        if (EditorGUI.EndChangeCheck())
+        {
+            Undo.RecordObject(baker, "Toggle Twist Redistribution");
+            baker.twistRedistribution = twist;
+            baker.twistRedistributionAmount = twistAmount;
+        }
+
+        EditorGUI.BeginChangeCheck();
+        bool aimThumbs = EditorGUILayout.ToggleLeft(
+            new GUIContent("Aim For Thumbs", "Approximates Rokoko Studio's Use Aim For Thumbs option."),
+            baker.aimForThumbs);
+        if (EditorGUI.EndChangeCheck())
+        {
+            Undo.RecordObject(baker, "Toggle Aim For Thumbs");
+            baker.aimForThumbs = aimThumbs;
+        }
     }
 
     // Adds the Rokoko Actor component and wires its Animator if missing, and computes a
@@ -195,7 +264,13 @@ public class RokokoMocapBakerEditor : Editor
         string baseName = Path.GetFileNameWithoutExtension(baker.jsonlPath);
         string outPath = AssetDatabase.GenerateUniqueAssetPath($"{folder}/{baker.gameObject.name}_{baseName}.anim");
 
-        RokokoJsonlBaker.RunBake(actor, baker.jsonlPath, outPath);
+        var options = new RokokoJsonlBaker.BakeOptions
+        {
+            twistRedistribution = baker.twistRedistribution,
+            twistRedistributionAmount = baker.twistRedistributionAmount,
+            aimForThumbs = baker.aimForThumbs,
+        };
+        RokokoJsonlBaker.RunBake(actor, baker.jsonlPath, outPath, options);
     }
 }
 #endif
