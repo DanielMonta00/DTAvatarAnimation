@@ -49,6 +49,15 @@ public static class RokokoJsonlBaker
         public bool twistRedistribution;
         public float twistRedistributionAmount;
         public bool aimForThumbs;
+
+        /// <summary>
+        /// Symmetric moving-average window radius (in captured frames) applied to every curve's
+        /// sampled values after baking. 0 disables it. A radius of N averages each frame with its
+        /// N neighbors on both sides (2N+1 samples total) to remove per-frame mocap sensor jitter
+        /// -- the "choppy" look tangent smoothing alone can't fix, since SmoothTangents only
+        /// reshapes interpolation between keys without changing the keys' values.
+        /// </summary>
+        public int temporalSmoothingRadius;
     }
 
     // (outer limb-segment twist muscle, inner limb-segment twist muscle) pairs Twist
@@ -251,6 +260,18 @@ public static class RokokoJsonlBaker
         if (applied == 0)
             return 0;
 
+        // Runs once over the whole captured sequence rather than live/per-frame, so unlike a
+        // causal filter it can average a frame against neighbors on BOTH sides -- that's what
+        // removes jitter without adding the lag a live low-pass filter would.
+        if (options.temporalSmoothingRadius > 0)
+        {
+            for (int m = 0; m < muscleCount; m++)
+                SmoothKeyframeValues(muscleKeys[m], options.temporalSmoothingRadius);
+            for (int a = 0; a < 3; a++)
+                SmoothKeyframeValues(rootTKeys[a], options.temporalSmoothingRadius);
+            SmoothAndRenormalizeQuaternionKeys(rootQKeys, options.temporalSmoothingRadius);
+        }
+
         var clip = new AnimationClip { name = Path.GetFileNameWithoutExtension(outClipPath) };
         for (int m = 0; m < muscleCount; m++)
             clip.SetCurve("", typeof(Animator), HumanTrait.MuscleName[m], BuildSmoothedCurve(muscleKeys[m]));
@@ -282,6 +303,65 @@ public static class RokokoJsonlBaker
         for (int k = 0; k < curve.length; k++)
             curve.SmoothTangents(k, 0f);
         return curve;
+    }
+
+    // Replaces each keyframe's value with the average of itself and its `radius` neighbors on
+    // both sides (clamped at the sequence's ends, so the window just shrinks near the edges
+    // rather than wrapping or padding). Reads from a snapshot of the original values so each
+    // output sample is computed from un-smoothed input, not from values this same pass already
+    // overwrote.
+    static void SmoothKeyframeValues(List<Keyframe> keys, int radius)
+    {
+        if (radius <= 0 || keys.Count < 2)
+            return;
+
+        var original = new float[keys.Count];
+        for (int i = 0; i < keys.Count; i++)
+            original[i] = keys[i].value;
+
+        for (int i = 0; i < keys.Count; i++)
+        {
+            int lo = Mathf.Max(0, i - radius);
+            int hi = Mathf.Min(original.Length - 1, i + radius);
+            float sum = 0f;
+            for (int j = lo; j <= hi; j++)
+                sum += original[j];
+
+            Keyframe k = keys[i];
+            k.value = sum / (hi - lo + 1);
+            keys[i] = k;
+        }
+    }
+
+    // RootQ is stored as 4 independent float curves (x/y/z/w), so smoothing each one separately
+    // -- like SmoothKeyframeValues does for every other curve -- would leave frames that are no
+    // longer unit-length quaternions. Renormalizing per frame afterwards fixes that; this is a
+    // cheap linear approximation of quaternion averaging rather than a proper SLERP-based
+    // average, but it's a fine approximation for small windows since BakeToClip's rootQKeys are
+    // already sign-continuous (see the Quaternion.Dot flip above) before this ever runs.
+    static void SmoothAndRenormalizeQuaternionKeys(List<Keyframe>[] rootQKeys, int radius)
+    {
+        if (radius <= 0 || rootQKeys[0].Count < 2)
+            return;
+
+        for (int c = 0; c < 4; c++)
+            SmoothKeyframeValues(rootQKeys[c], radius);
+
+        for (int i = 0; i < rootQKeys[0].Count; i++)
+        {
+            var q = new Vector4(rootQKeys[0][i].value, rootQKeys[1][i].value,
+                rootQKeys[2][i].value, rootQKeys[3][i].value);
+            if (q.sqrMagnitude < 1e-8f)
+                continue;
+            q.Normalize();
+
+            for (int c = 0; c < 4; c++)
+            {
+                Keyframe k = rootQKeys[c][i];
+                k.value = q[c];
+                rootQKeys[c][i] = k;
+            }
+        }
     }
 
     // Calls a private/protected no-arg instance method on Actor without modifying the

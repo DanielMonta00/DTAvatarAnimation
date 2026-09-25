@@ -41,6 +41,13 @@ public class RokokoMocapBaker : MonoBehaviour
         + "Rokoko's own retargeting ignores for every bone except the hips. Approximates Rokoko "
         + "Studio's Use Aim For Thumbs option.")]
     public bool aimForThumbs = false;
+
+    [Header("Temporal smoothing")]
+    [Range(0, 10)]
+    [Tooltip("Averages every baked curve's values over +/- N neighboring frames to remove "
+        + "per-frame mocap sensor jitter (the 'choppy' look) that tangent smoothing alone can't "
+        + "fix. 0 disables it. Larger values remove more jitter but can blur fast real motion.")]
+    public int temporalSmoothingRadius = 0;
 }
 
 #if UNITY_EDITOR
@@ -187,6 +194,20 @@ public class RokokoMocapBakerEditor : Editor
             Undo.RecordObject(baker, "Toggle Aim For Thumbs");
             baker.aimForThumbs = aimThumbs;
         }
+
+        EditorGUILayout.Space();
+        EditorGUI.BeginChangeCheck();
+        int smoothingRadius = EditorGUILayout.IntSlider(
+            new GUIContent("Temporal Smoothing Radius",
+                "+/- N frame moving average applied to every baked curve, to remove sensor "
+                + "jitter (choppy playback). 0 = off. Bake once at 0, again at e.g. 2-4, and "
+                + "compare."),
+            baker.temporalSmoothingRadius, 0, 10);
+        if (EditorGUI.EndChangeCheck())
+        {
+            Undo.RecordObject(baker, "Change Rokoko Temporal Smoothing Radius");
+            baker.temporalSmoothingRadius = smoothingRadius;
+        }
     }
 
     // Adds the Rokoko Actor component and wires its Animator if missing, and computes a
@@ -269,6 +290,7 @@ public class RokokoMocapBakerEditor : Editor
             twistRedistribution = baker.twistRedistribution,
             twistRedistributionAmount = baker.twistRedistributionAmount,
             aimForThumbs = baker.aimForThumbs,
+            temporalSmoothingRadius = baker.temporalSmoothingRadius,
         };
         RokokoJsonlBaker.RunBake(actor, baker.jsonlPath, outPath, options);
     }
