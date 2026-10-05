@@ -335,8 +335,12 @@ public class MultiViewRecorder : MonoBehaviour
             }
             else
             {
+                // Calibrated cameras capture at their real sensor resolution.
+                bool calibrated = c.TryGetComponent(out CalibratedCamera cc) && cc.IsApplied;
                 CaptureSettings.Resolve(captureResolution,
-                    c.pixelWidth, c.pixelHeight, customWidth, customHeight,
+                    calibrated ? cc.imageWidth : c.pixelWidth,
+                    calibrated ? cc.imageHeight : c.pixelHeight,
+                    customWidth, customHeight,
                     out int slotW, out int slotH);
                 slot.width = slotW;
                 slot.height = slotH;
@@ -353,6 +357,7 @@ public class MultiViewRecorder : MonoBehaviour
                 slot.captureCamGO.transform.SetParent(c.transform, false);
                 slot.captureCam = slot.captureCamGO.AddComponent<Camera>();
                 slot.captureCam.CopyFrom(c);
+                if (calibrated) slot.captureCam.projectionMatrix = c.projectionMatrix; // keep the calibrated K
                 slot.captureCam.targetTexture = slot.rt;
                 // Render just after the source camera so it sees the same frame state.
                 slot.captureCam.depth = c.depth + 100f;
@@ -766,15 +771,35 @@ public class MultiViewRecorder : MonoBehaviour
 
     // ---------------- Projection ----------------
 
+    // Pinhole intrinsics (px) for the slot's output size. Calibrated cameras report their
+    // real K (non-square pixels, off-centre principal point); others the symmetric K
+    // implied by the field of view.
+    static void PinholeK(CameraSlot slot, out float fx, out float fy, out float cx, out float cy)
+    {
+        if (slot.cam.TryGetComponent(out CalibratedCamera cc) && cc.IsApplied)
+        {
+            cc.GetIntrinsics(slot.width, slot.height, out fx, out fy, out cx, out cy);
+            return;
+        }
+        float vFovRad = slot.cam.fieldOfView * Mathf.Deg2Rad;
+        fy = 0.5f * slot.height / Mathf.Tan(vFovRad * 0.5f);
+        fx = fy;
+        cx = slot.width * 0.5f;
+        cy = slot.height * 0.5f;
+    }
+
     void ProjectPinhole(Camera cam, int imgW, int imgH, Vector3 worldPos,
                         out Vector2 pixel, out float depth, out bool visible)
     {
-        Vector3 sp = cam.WorldToScreenPoint(worldPos);
-        depth = sp.z;
-        float u = sp.x;
-        float v = flipKeypointY ? sp.y : (imgH - 1) - sp.y;
+        // Viewport coords don't depend on the Game view size, so the pixels stay correct
+        // when the capture RT differs from it (same result when they match).
+        Vector3 vp = cam.WorldToViewportPoint(worldPos);
+        depth = vp.z;
+        float u = vp.x * imgW;
+        float vBottom = vp.y * imgH;
+        float v = flipKeypointY ? vBottom : (imgH - 1) - vBottom;
         pixel = new Vector2(u, v);
-        visible = sp.z > cam.nearClipPlane && u >= 0f && u < imgW && v >= 0f && v < imgH;
+        visible = vp.z > cam.nearClipPlane && u >= 0f && u < imgW && v >= 0f && v < imgH;
     }
 
     // Equidistant fisheye / fulldome projection (mirrors KeypointsRecorder's
@@ -1129,11 +1154,7 @@ public class MultiViewRecorder : MonoBehaviour
         }
         else
         {
-            float vFovRad = cam.fieldOfView * Mathf.Deg2Rad;
-            float fy = 0.5f * slot.height / Mathf.Tan(vFovRad * 0.5f);
-            float fx = fy;
-            float cx = slot.width * 0.5f;
-            float cy = slot.height * 0.5f;
+            PinholeK(slot, out float fx, out float fy, out float cx, out float cy);
             sb.Append(", \"model\": \"pinhole\"")
               .Append(", \"fx\": ").Append(F(fx))
               .Append(", \"fy\": ").Append(F(fy))
@@ -1188,11 +1209,7 @@ public class MultiViewRecorder : MonoBehaviour
             }
             else
             {
-                float vFovRad = cam.fieldOfView * Mathf.Deg2Rad;
-                float fy = 0.5f * h / Mathf.Tan(vFovRad * 0.5f);
-                float fx = fy;
-                float cx = w * 0.5f;
-                float cy = h * 0.5f;
+                PinholeK(slot, out float fx, out float fy, out float cx, out float cy);
                 sb.Append(", \"model\": \"pinhole\"");
                 sb.Append(", \"fx\": ").Append(F(fx));
                 sb.Append(", \"fy\": ").Append(F(fy));
@@ -1217,7 +1234,6 @@ public class MultiViewRecorder : MonoBehaviour
     // Flat single-camera intrinsics file (KeypointsRecorder-compatible).
     void WriteKJson(CameraSlot slot)
     {
-        Camera cam = slot.cam;
         int w = slot.width, h = slot.height;
         var sb = new StringBuilder(512);
         sb.Append("{\n");
@@ -1232,11 +1248,7 @@ public class MultiViewRecorder : MonoBehaviour
         }
         else
         {
-            float vFovRad = cam.fieldOfView * Mathf.Deg2Rad;
-            float fy = 0.5f * h / Mathf.Tan(vFovRad * 0.5f);
-            float fx = fy;
-            float cx = w * 0.5f;
-            float cy = h * 0.5f;
+            PinholeK(slot, out float fx, out float fy, out float cx, out float cy);
             sb.Append("  \"model\": \"pinhole\",\n");
             sb.Append("  \"image_size\": [").Append(w).Append(", ").Append(h).Append("],\n");
             sb.Append("  \"fx\": ").Append(F(fx)).Append(",\n");
