@@ -144,6 +144,7 @@ public class MultiViewRecorder : MonoBehaviour
         public bool ownsDomeFbo;              // true if we created the domemasterFbo and must release it
         public Camera captureCam;             // shadow camera that renders cam's view into rt (pinhole only)
         public GameObject captureCamGO;       // owns captureCam; destroyed on EndRecording
+        public CalibratedCamera calib;        // non-null => calibrated K (+ lens distortion when DistortionActive)
         public string rgbDir, keyrgbDir, bboxDir, bboxVisDir;
         public int width, height;
         public int index1; // 1-based folder index (cam_1/, cam_2/, ...)
@@ -344,23 +345,36 @@ public class MultiViewRecorder : MonoBehaviour
                     out int slotW, out int slotH);
                 slot.width = slotW;
                 slot.height = slotH;
-                slot.rt = new RenderTexture(slot.width, slot.height, 24, RenderTextureFormat.ARGB32);
-                slot.rt.Create();
-                slot.source = slot.rt;
+                slot.calib = calibrated ? cc : null;
 
-                // Capture through a shadow camera that mirrors this camera's pose +
-                // settings and renders the scene into slot.rt. The original camera
-                // is left untouched so its display keeps showing the scene — hijacking
-                // the original's targetTexture would blank whatever screen it drives.
-                slot.captureCamGO = new GameObject($"_MultiViewRecorder_CaptureCam_{idx1}");
-                slot.captureCamGO.hideFlags = HideFlags.HideAndDontSave;
-                slot.captureCamGO.transform.SetParent(c.transform, false);
-                slot.captureCam = slot.captureCamGO.AddComponent<Camera>();
-                slot.captureCam.CopyFrom(c);
-                if (calibrated) slot.captureCam.projectionMatrix = c.projectionMatrix; // keep the calibrated K
-                slot.captureCam.targetTexture = slot.rt;
-                // Render just after the source camera so it sees the same frame state.
-                slot.captureCam.depth = c.depth + 100f;
+                if (calibrated && cc.DistortionActive)
+                {
+                    // Lens-distorted capture: the calibrated camera already renders the
+                    // scene into its own textures (like the dome pipeline), so read its
+                    // distorted output directly. No shadow camera, nothing to release here.
+                    cc.EnsureDistortedOutput(slot.width, slot.height);
+                    slot.source = cc.DistortedTexture;
+                }
+                else
+                {
+                    slot.rt = new RenderTexture(slot.width, slot.height, 24, RenderTextureFormat.ARGB32);
+                    slot.rt.Create();
+                    slot.source = slot.rt;
+
+                    // Capture through a shadow camera that mirrors this camera's pose +
+                    // settings and renders the scene into slot.rt. The original camera
+                    // is left untouched so its display keeps showing the scene — hijacking
+                    // the original's targetTexture would blank whatever screen it drives.
+                    slot.captureCamGO = new GameObject($"_MultiViewRecorder_CaptureCam_{idx1}");
+                    slot.captureCamGO.hideFlags = HideFlags.HideAndDontSave;
+                    slot.captureCamGO.transform.SetParent(c.transform, false);
+                    slot.captureCam = slot.captureCamGO.AddComponent<Camera>();
+                    slot.captureCam.CopyFrom(c);
+                    if (calibrated) slot.captureCam.projectionMatrix = c.projectionMatrix; // keep the calibrated K
+                    slot.captureCam.targetTexture = slot.rt;
+                    // Render just after the source camera so it sees the same frame state.
+                    slot.captureCam.depth = c.depth + 100f;
+                }
             }
             slots.Add(slot);
         }
@@ -544,7 +558,7 @@ public class MultiViewRecorder : MonoBehaviour
                             ProjectDome(slot.domeCam, cam, slot.width, slot.height, wp,
                                         out imgPos[k], out imgDepth[k], out projVisible);
                         else
-                            ProjectPinhole(cam, slot.width, slot.height, wp,
+                            ProjectPinhole(cam, slot.calib, slot.width, slot.height, wp,
                                            out imgPos[k], out imgDepth[k], out projVisible);
                         // Force invisible for unresolved keypoints so missing joints
                         // (e.g. COCO face kps on a rig without eye bones) don't draw
@@ -577,6 +591,9 @@ public class MultiViewRecorder : MonoBehaviour
                 int ci = c;
                 var slot = slots[ci];
                 int w = slot.width, h = slot.height;
+
+                // Make sure the distorted texture holds this frame before it is read back.
+                if (slot.calib != null && slot.calib.DistortionActive) slot.calib.RenderDistorted();
 
                 AsyncGPUReadback.Request(slot.source, 0, TextureFormat.RGB24, req =>
                 {
@@ -776,9 +793,9 @@ public class MultiViewRecorder : MonoBehaviour
     // implied by the field of view.
     static void PinholeK(CameraSlot slot, out float fx, out float fy, out float cx, out float cy)
     {
-        if (slot.cam.TryGetComponent(out CalibratedCamera cc) && cc.IsApplied)
+        if (slot.calib != null)
         {
-            cc.GetIntrinsics(slot.width, slot.height, out fx, out fy, out cx, out cy);
+            slot.calib.GetIntrinsics(slot.width, slot.height, out fx, out fy, out cx, out cy);
             return;
         }
         float vFovRad = slot.cam.fieldOfView * Mathf.Deg2Rad;
@@ -788,12 +805,29 @@ public class MultiViewRecorder : MonoBehaviour
         cy = slot.height * 0.5f;
     }
 
-    void ProjectPinhole(Camera cam, int imgW, int imgH, Vector3 worldPos,
+    // Lens model of a calibrated camera whose distortion is rendered: the saved images are
+    // distorted with these OpenCV coefficients (k1, k2, p1, p2, k3), and K applies to them as is.
+    static string DistortionJson(CameraSlot slot)
+    {
+        if (slot.calib == null || !slot.calib.DistortionActive) return "";
+        float[] d = slot.calib.distCoeffs;
+        var sb = new StringBuilder(96);
+        sb.Append(", \"distortion_model\": \"opencv\", \"dist_coeffs\": [");
+        for (int i = 0; i < d.Length; i++)
+        {
+            if (i > 0) sb.Append(",");
+            sb.Append(d[i].ToString("G9", CultureInfo.InvariantCulture));
+        }
+        return sb.Append("]").ToString();
+    }
+
+    void ProjectPinhole(Camera cam, CalibratedCamera calib, int imgW, int imgH, Vector3 worldPos,
                         out Vector2 pixel, out float depth, out bool visible)
     {
         // Viewport coords don't depend on the Game view size, so the pixels stay correct
-        // when the capture RT differs from it (same result when they match).
-        Vector3 vp = cam.WorldToViewportPoint(worldPos);
+        // when the capture RT differs from it (same result when they match). Calibrated
+        // cameras also apply the lens distortion, to match their distorted image.
+        Vector3 vp = calib != null ? calib.WorldToViewport(worldPos) : cam.WorldToViewportPoint(worldPos);
         depth = vp.z;
         float u = vp.x * imgW;
         float vBottom = vp.y * imgH;
@@ -1160,10 +1194,11 @@ public class MultiViewRecorder : MonoBehaviour
               .Append(", \"fy\": ").Append(F(fy))
               .Append(", \"cx\": ").Append(F(cx))
               .Append(", \"cy\": ").Append(F(cy))
+              .Append(DistortionJson(slot))
               .Append(", \"near\": ").Append(F(cam.nearClipPlane))
               .Append(", \"far\": ").Append(F(cam.farClipPlane))
               .Append(", \"world_to_camera\": ").Append(M4(cam.worldToCameraMatrix))
-              .Append(", \"projection\": ").Append(M4(cam.projectionMatrix));
+              .Append(", \"projection\": ").Append(M4(slot.calib != null ? slot.calib.Projection : cam.projectionMatrix));
         }
         sb.Append(" }");
         return sb.ToString();
@@ -1218,7 +1253,8 @@ public class MultiViewRecorder : MonoBehaviour
                 sb.Append(", \"K\": [[").Append(F(fx)).Append(", 0, ").Append(F(cx)).Append("],")
                            .Append(" [0, ").Append(F(fy)).Append(", ").Append(F(cy)).Append("],")
                            .Append(" [0, 0, 1]]");
-                sb.Append(", \"projection\": ").Append(M4(cam.projectionMatrix));
+                sb.Append(DistortionJson(slot));
+                sb.Append(", \"projection\": ").Append(M4(slot.calib != null ? slot.calib.Projection : cam.projectionMatrix));
                 sb.Append(", \"near\": ").Append(F(cam.nearClipPlane));
                 sb.Append(", \"far\": ").Append(F(cam.farClipPlane));
             }
@@ -1257,7 +1293,7 @@ public class MultiViewRecorder : MonoBehaviour
             sb.Append("  \"cy\": ").Append(F(cy)).Append(",\n");
             sb.Append("  \"K\": [[").Append(F(fx)).Append(", 0, ").Append(F(cx)).Append("],")
                        .Append(" [0, ").Append(F(fy)).Append(", ").Append(F(cy)).Append("],")
-                       .Append(" [0, 0, 1]]\n");
+                       .Append(" [0, 0, 1]]").Append(DistortionJson(slot)).Append("\n");
         }
         sb.Append("}\n");
         File.WriteAllText(Path.Combine(sessionPath, "K.json"), sb.ToString());

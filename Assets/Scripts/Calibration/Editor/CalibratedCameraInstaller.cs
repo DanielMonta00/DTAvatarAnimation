@@ -6,12 +6,14 @@ using UnityEngine.SceneManagement;
 
 // Tools > Calibration > Install cam107 cameras: creates cam107-main and cam107-sub
 // (CalibratedCamera) under a "CalibratedCameras" root in the active scene, wired to
-// the JSON copies in Assets/Calibration and to the scene's "MOCAP Center".
+// the JSON copies in Assets/Calibration and to the scene's "MOCAPcenter".
 // Safe to re-run: existing objects are reused and re-wired.
 public static class CalibratedCameraInstaller
 {
-    const string Dir = "Assets/Calibration";
-    const string FrameName = "MOCAP Center";
+    // Calibration set for the PTZ pose the recorded datasets use (azimuth 2100 / elevation 350).
+    const string Dir = "Assets/Calibration/pose_2100_350";
+    // Exact name; the scene also has an unrelated "MOCAP Center" (with a space) that must stay ignored.
+    const string FrameName = "MOCAPcenter";
     const string RootName = "CalibratedCameras";
     const string CameraKey = "cam107";
 
@@ -78,13 +80,64 @@ public static class CalibratedCameraInstaller
         cc.extrinsicsJson = extrinsics;
         cc.cameraKey = CameraKey;
         cc.worldFrame = frame;
+        if (cc.distortionShader == null) cc.distortionShader = Shader.Find(CalibratedCamera.DistortionShaderName);
         cc.Apply();
         EditorUtility.SetDirty(cc);
         return go.transform;
     }
 
+
+    const string AvatarParentName = "HumanDataset";
+    const string AvatarName = "OperatorPete";
+    const string RegistrationPath = "Assets/Calibration/test01_20261001_172733_registration.json";
+
+    [MenuItem("Tools/Calibration/Place HumanDataset avatar (OperatorPete) at dataset registration")]
+    public static void PlaceHumanDatasetAvatar()
+    {
+        AssetDatabase.Refresh();
+        var registration = AssetDatabase.LoadAssetAtPath<TextAsset>(RegistrationPath);
+        if (registration == null)
+        {
+            EditorUtility.DisplayDialog("Place avatar", $"Missing {RegistrationPath}.", "OK");
+            return;
+        }
+
+        Scene scene = SceneManager.GetActiveScene();
+        Transform frame = FindByName(scene, FrameName);
+        Transform parent = FindByName(scene, AvatarParentName);
+        if (frame == null || parent == null)
+        {
+            EditorUtility.DisplayDialog("Place avatar",
+                $"Need '{FrameName}' and '{AvatarParentName}' in scene '{scene.name}'.", "OK");
+            return;
+        }
+
+        // The component drives `parent`; the baked clip's frame is the parent's local frame, so
+        // the avatar must sit at identity under it.
+        Transform avatar = parent.Find(AvatarName);
+        if (avatar == null)
+            Debug.LogWarning($"[RokokoFramePlacement] '{AvatarParentName}' has no child '{AvatarName}'.");
+        else if (avatar.localPosition.sqrMagnitude > 1e-6f || Quaternion.Angle(avatar.localRotation, Quaternion.identity) > 0.01f)
+            Debug.LogWarning($"[RokokoFramePlacement] '{AvatarName}' is not at identity under '{AvatarParentName}' " +
+                             $"(local {avatar.localPosition}, {avatar.localEulerAngles}); its offset adds to the placement.");
+
+        var placement = parent.GetComponent<RokokoFramePlacement>();
+        if (placement == null) placement = Undo.AddComponent<RokokoFramePlacement>(parent.gameObject);
+        Undo.RecordObject(placement, "Wire placement");
+        Undo.RecordObject(parent, "Place " + AvatarParentName);
+        placement.registrationJson = registration;
+        placement.worldFrame = frame;
+        placement.Apply();
+        EditorUtility.SetDirty(placement);
+
+        EditorSceneManager.MarkSceneDirty(scene);
+        Selection.activeTransform = parent;
+        Debug.Log($"[RokokoFramePlacement] '{AvatarParentName}' placed at {parent.position}, yaw {parent.eulerAngles.y:F2} " +
+                  $"(frame '{FrameName}' {frame.position}).");
+    }
+
     // Includes inactive objects, which GameObject.Find skips.
-    static Transform FindByName(Scene scene, string name)
+    internal static Transform FindByName(Scene scene, string name)
     {
         foreach (GameObject r in scene.GetRootGameObjects())
         {
