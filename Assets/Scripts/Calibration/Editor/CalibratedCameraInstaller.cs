@@ -1,4 +1,10 @@
 #if UNITY_EDITOR
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -135,6 +141,123 @@ public static class CalibratedCameraInstaller
         Debug.Log($"[RokokoFramePlacement] '{AvatarParentName}' placed at {parent.position}, yaw {parent.eulerAngles.y:F2} " +
                   $"(frame '{FrameName}' {frame.position}).");
     }
+
+    // ---- Placeholder calibration for cam103 / cam120 ----
+
+    const string PlaceholderDir = "Assets/Calibration/placeholder_103_120";
+
+    // Tools > Calibration > Fabricate placeholder calibration (cam103 + cam120)
+    //
+    // For cameras whose CalibratedCamera was switched off so they could be dragged into place:
+    // reads each camera's CURRENT placement, writes the extrinsics that would reproduce it
+    // (relative to MOCAPcenter, OpenCV rvec/tvec in meters, flagged calibrated:false because they
+    // are made up), wires the component to the real intrinsics copied into the same folder and
+    // switches it back on. Cameras are found by a "103" or "120" in their name; if none match,
+    // the selected cameras are used. Replace camera_extrinsics.json with a real export later.
+    [MenuItem("Tools/Calibration/Fabricate placeholder calibration (cam103 + cam120)")]
+    public static void FabricatePlaceholderCalibration()
+    {
+        AssetDatabase.Refresh();
+        Scene scene = SceneManager.GetActiveScene();
+        Transform frame = FindByName(scene, FrameName);
+        if (frame == null)
+        {
+            EditorUtility.DisplayDialog("Placeholder calibration", $"No '{FrameName}' in scene '{scene.name}'.", "OK");
+            return;
+        }
+
+        // key ("cam103"), stream ("main" / "sub") per camera.
+        var cams = new List<(string key, string stream, CalibratedCamera cc)>();
+        foreach (var cc in Object.FindObjectsByType<CalibratedCamera>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+            AddIfPlaceholderCamera(cams, cc);
+        if (cams.Count == 0)
+            foreach (var go in Selection.gameObjects)
+                if (go.TryGetComponent(out CalibratedCamera selected)) AddIfPlaceholderCamera(cams, selected);
+        if (cams.Count == 0)
+        {
+            EditorUtility.DisplayDialog("Placeholder calibration",
+                "No CalibratedCamera with '103' or '120' in its name. Rename the two cameras (e.g. cam103-main, cam120-main) " +
+                "or select them in the Hierarchy and run again.", "OK");
+            return;
+        }
+
+        // 1) Capture each camera's pose BEFORE touching the components (Apply() moves the camera).
+        var poses = new Dictionary<string, (Vector3 pos, Quaternion rot, CalibratedCamera.WorldMirror mirror)>();
+        Quaternion fr = frame.rotation;
+        foreach (var (key, stream, cc) in cams)
+        {
+            Vector3 p = Quaternion.Inverse(fr) * (cc.transform.position - frame.position);
+            Quaternion q = Quaternion.Inverse(fr) * cc.transform.rotation;
+            if (!poses.TryGetValue(key, out var first)) { poses[key] = (p, q, cc.handedness); continue; }
+            if (Vector3.Distance(first.pos, p) > 0.02f || Quaternion.Angle(first.rot, q) > 0.5f)
+                Debug.LogWarning($"[Placeholder calibration] '{cc.name}' is not where the other {key} camera is " +
+                                 $"({Vector3.Distance(first.pos, p):F2} m apart); using the first one's placement for both streams.");
+        }
+
+        // 2) Write the extrinsics file.
+        var sb = new StringBuilder(1024);
+        sb.Append("{\n  \"_comment\": \"PLACEHOLDER extrinsics, fabricated from where the cameras were placed by hand in the Unity scene ")
+          .Append("(relative to MOCAPcenter). Not a calibration: replace with a real PTZCalibration export. ")
+          .Append("Same convention as camera_extrinsics.json: X_cam = R*X_world + t, R = cv2.Rodrigues(rvec), meters.\",\n  \"cameras\": {");
+        bool firstKey = true;
+        foreach (var kv in poses.OrderBy(k => k.Key))
+        {
+            CalibratedCamera.ExtrinsicsFromPose(kv.Value.pos, kv.Value.rot, kv.Value.mirror, out double[] rvec, out double[] tvec);
+            sb.Append(firstKey ? "\n" : ",\n").Append("    \"").Append(kv.Key).Append("\": {\n");
+            sb.Append("      \"rvec\": ").Append(Vec3Json(rvec)).Append(",\n");
+            sb.Append("      \"tvec\": ").Append(Vec3Json(tvec)).Append(",\n");
+            sb.Append("      \"calibrated\": false,\n      \"placeholder\": true\n    }");
+            firstKey = false;
+        }
+        sb.Append("\n  }\n}\n");
+        string extrinsicsPath = $"{PlaceholderDir}/camera_extrinsics.json";
+        Directory.CreateDirectory(PlaceholderDir);
+        File.WriteAllText(extrinsicsPath, sb.ToString(), new UTF8Encoding(false));
+        AssetDatabase.ImportAsset(extrinsicsPath);
+        var extrinsics = AssetDatabase.LoadAssetAtPath<TextAsset>(extrinsicsPath);
+
+        // 3) Wire and re-enable each camera, then check it lands where it was.
+        foreach (var (key, stream, cc) in cams)
+        {
+            var intrinsics = AssetDatabase.LoadAssetAtPath<TextAsset>($"{PlaceholderDir}/{key}-{stream}.json");
+            if (intrinsics == null)
+            {
+                Debug.LogError($"[Placeholder calibration] missing {PlaceholderDir}/{key}-{stream}.json; '{cc.name}' skipped.");
+                continue;
+            }
+            Vector3 beforePos = cc.transform.position;
+            Quaternion beforeRot = cc.transform.rotation;
+
+            Undo.RecordObject(cc, "Wire placeholder calibration");
+            Undo.RecordObject(cc.transform, "Wire placeholder calibration");
+            cc.intrinsicsJson = intrinsics;
+            cc.extrinsicsJson = extrinsics;
+            cc.cameraKey = key;
+            cc.zoom = 10;
+            cc.worldFrame = frame;
+            if (cc.distortionShader == null) cc.distortionShader = Shader.Find(CalibratedCamera.DistortionShaderName);
+            cc.enabled = true;
+            cc.Apply();
+            EditorUtility.SetDirty(cc);
+
+            Debug.Log($"[Placeholder calibration] '{cc.name}' -> {key}-{stream}, back at its placement within " +
+                      $"{Vector3.Distance(beforePos, cc.transform.position) * 1000f:F2} mm / {Quaternion.Angle(beforeRot, cc.transform.rotation):F3} deg.");
+        }
+
+        EditorSceneManager.MarkSceneDirty(scene);
+        Debug.Log($"[Placeholder calibration] wrote {extrinsicsPath} for {string.Join(", ", poses.Keys.OrderBy(k => k))} (calibrated:false).");
+    }
+
+    static void AddIfPlaceholderCamera(List<(string key, string stream, CalibratedCamera cc)> list, CalibratedCamera cc)
+    {
+        Match m = Regex.Match(cc.name, @"(?<!\d)(103|120)(?!\d)");
+        if (!m.Success) return;
+        string stream = Regex.IsMatch(cc.name, "sub", RegexOptions.IgnoreCase) ? "sub" : "main";
+        list.Add(("cam" + m.Value, stream, cc));
+    }
+
+    static string Vec3Json(double[] v) =>
+        "[" + string.Join(", ", v.Select(x => x.ToString("R", CultureInfo.InvariantCulture))) + "]";
 
     // Includes inactive objects, which GameObject.Find skips.
     internal static Transform FindByName(Scene scene, string name)

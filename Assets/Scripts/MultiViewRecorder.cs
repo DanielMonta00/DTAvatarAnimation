@@ -145,6 +145,7 @@ public class MultiViewRecorder : MonoBehaviour
         public Camera captureCam;             // shadow camera that renders cam's view into rt (pinhole only)
         public GameObject captureCamGO;       // owns captureCam; destroyed on EndRecording
         public CalibratedCamera calib;        // non-null => calibrated K (+ lens distortion when DistortionActive)
+        public bool sourceLostWarned;         // warn once when the image source disappears
         public string rgbDir, keyrgbDir, bboxDir, bboxVisDir;
         public int width, height;
         public int index1; // 1-based folder index (cam_1/, cam_2/, ...)
@@ -592,8 +593,30 @@ public class MultiViewRecorder : MonoBehaviour
                 var slot = slots[ci];
                 int w = slot.width, h = slot.height;
 
-                // Make sure the distorted texture holds this frame before it is read back.
-                if (slot.calib != null && slot.calib.DistortionActive) slot.calib.RenderDistorted();
+                // A calibrated camera rebuilds its textures whenever it is re-applied (Inspector edit, re-imported
+                // calibration JSON...), so ask for its current output every frame instead of keeping the reference
+                // taken when recording started, and make sure it holds this frame before it is read back.
+                if (slot.calib != null && slot.calib.DistortionActive)
+                {
+                    slot.calib.EnsureDistortedOutput(slot.width, slot.height);
+                    slot.calib.RenderDistorted();
+                    slot.source = slot.calib.DistortedTexture;
+                }
+
+                // Source gone (camera switched off or destroyed mid-recording): drop this frame rather than throw every frame.
+                if (slot.source == null)
+                {
+                    if (!slot.sourceLostWarned)
+                    {
+                        Debug.LogWarning($"[MultiViewRecorder] cam_{slot.index1} has no image source (is its CalibratedCamera disabled?); frames are dropped until it comes back.");
+                        slot.sourceLostWarned = true;
+                    }
+                    hadError[ci] = 1;
+                    if (Interlocked.Decrement(ref pendingReadbacks) == 0)
+                        CommitFrame(idx, relTime, ts, frameJson, allBytes, hadError, imgPosByCam, visByCam);
+                    continue;
+                }
+                slot.sourceLostWarned = false;
 
                 AsyncGPUReadback.Request(slot.source, 0, TextureFormat.RGB24, req =>
                 {

@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.UI;
 
 // Pinhole camera driven directly by PTZCalibration exports (the JSON copies in
@@ -33,6 +34,7 @@ using UnityEngine.UI;
 public class CalibratedCamera : MonoBehaviour
 {
     public const string DistortionShaderName = "Calibration/LensDistortionRemap";
+    static readonly HashSet<string> warnedPlaceholders = new HashSet<string>();
 
     public enum WorldMirror
     {
@@ -86,6 +88,7 @@ public class CalibratedCamera : MonoBehaviour
     double usableRadius2;
     LensDistortionRenderer lens;
     Coroutine renderLoop;
+    bool renderHooked;
     GameObject presenter;
     Canvas presenterCanvas;
     Camera presenterCamera;
@@ -134,6 +137,10 @@ public class CalibratedCamera : MonoBehaviour
     [ContextMenu("Reload calibration from JSON")]
     public void Apply()
     {
+        // A disabled component means "hands off": the camera may have been placed by hand, so
+        // re-imports, Inspector edits and the menu tools must not move it. Enabling it re-applies.
+        if (!isActiveAndEnabled) return;
+
         loaded = false;
         DisposeLens();
         cam = GetComponent<Camera>();
@@ -199,13 +206,13 @@ public class CalibratedCamera : MonoBehaviour
         if (lens != null)
         {
             EnsureDistortedOutput(imageWidth, imageHeight);
-            renderLoop = StartCoroutine(RenderLoop());
+            HookRender();
         }
     }
 
     void DisposeLens()
     {
-        if (renderLoop != null) { StopCoroutine(renderLoop); renderLoop = null; }
+        UnhookRender();
         DestroyPresenter();
         if (lens == null) return;
         if (cam != null) cam.targetTexture = null; // never leave the camera pointing at a released texture
@@ -227,9 +234,35 @@ public class CalibratedCamera : MonoBehaviour
         RefreshPresenter();
     }
 
-    // Resamples the latest ideal render into DistortedTexture. Runs by itself at the end of
-    // every frame; callers that read the texture back can call it first to be certain.
+    // Resamples the latest ideal render into DistortedTexture. Runs by itself right after this camera has
+    // rendered; callers that read the texture back can call it first to be certain.
     public void RenderDistorted() { lens?.Render(); }
+
+    // The remap is driven by the render pipeline's own "camera finished" callback rather than
+    // WaitForEndOfFrame: that coroutine only fires while a Game view is actually presenting, so with the
+    // Game tab hidden (or headless) the output texture would stay black.
+    void HookRender()
+    {
+        if (renderHooked) return;
+        renderHooked = true;
+        if (GraphicsSettings.currentRenderPipeline != null)
+            RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
+        else
+            renderLoop = StartCoroutine(RenderLoop()); // built-in pipeline has no such callback
+    }
+
+    void UnhookRender()
+    {
+        if (!renderHooked) return;
+        renderHooked = false;
+        RenderPipelineManager.endCameraRendering -= OnEndCameraRendering;
+        if (renderLoop != null) { StopCoroutine(renderLoop); renderLoop = null; }
+    }
+
+    void OnEndCameraRendering(ScriptableRenderContext context, Camera camera)
+    {
+        if (camera == cam && lens != null) lens.Render();
+    }
 
     IEnumerator RenderLoop()
     {
@@ -381,8 +414,8 @@ public class CalibratedCamera : MonoBehaviour
         if (!cams.TryGetValue(key, out object o))
             throw new Exception($"no cameras['{key}'] (available: {string.Join(", ", cams.Keys)})");
         var c = (Dictionary<string, object>)o;
-        if (c.TryGetValue("calibrated", out object cal) && cal is bool b && !b)
-            Debug.LogWarning($"[CalibratedCamera] extrinsics for '{key}' are marked calibrated:false (placeholder pose).");
+        if (c.TryGetValue("calibrated", out object cal) && cal is bool b && !b && warnedPlaceholders.Add(key))
+            Debug.LogWarning($"[CalibratedCamera] extrinsics for '{key}' are marked calibrated:false (placeholder pose, not a real calibration).");
         rvec = ToVec3((List<object>)c["rvec"]);
         tvec = ToVec3((List<object>)c["tvec"]);
     }
@@ -410,6 +443,62 @@ public class CalibratedCamera : MonoBehaviour
         Vector3 forward = Mirror(R[2, 0], R[2, 1], R[2, 2]);
         Vector3 up = -Mirror(R[1, 0], R[1, 1], R[1, 2]); // OpenCV y points down
         rotation = Quaternion.LookRotation(forward, up);
+    }
+
+    // Inverse of PoseInFrame: the OpenCV rvec / tvec (X_cam = R * X_world + t) of a camera sitting at
+    // `position` / `rotation` in the world frame (Unity handedness, meters).
+    public static void ExtrinsicsFromPose(Vector3 position, Quaternion rotation, WorldMirror mirror,
+                                          out double[] rvec, out double[] tvec)
+    {
+        double[] Mirror(Vector3 v) => mirror == WorldMirror.NegateX
+            ? new double[] { -v.x, v.y, v.z }
+            : new double[] { v.x, v.y, -v.z };
+
+        // Rows of R are the camera's right / down / forward axes in the calibration world.
+        double[] right = Mirror(rotation * Vector3.right);
+        double[] up = Mirror(rotation * Vector3.up);
+        double[] forward = Mirror(rotation * Vector3.forward);
+        double[,] R =
+        {
+            { right[0], right[1], right[2] },
+            { -up[0], -up[1], -up[2] },
+            { forward[0], forward[1], forward[2] },
+        };
+        double[] c = Mirror(position);
+        tvec = new[]
+        {
+            -(R[0, 0] * c[0] + R[0, 1] * c[1] + R[0, 2] * c[2]),
+            -(R[1, 0] * c[0] + R[1, 1] * c[1] + R[1, 2] * c[2]),
+            -(R[2, 0] * c[0] + R[2, 1] * c[1] + R[2, 2] * c[2]),
+        };
+        rvec = RotationToRodrigues(R);
+    }
+
+    static double[] RotationToRodrigues(double[,] R)
+    {
+        double cosT = Math.Max(-1.0, Math.Min(1.0, (R[0, 0] + R[1, 1] + R[2, 2] - 1.0) / 2.0));
+        double th = Math.Acos(cosT);
+        if (th < 1e-9) return new double[] { 0, 0, 0 };
+
+        double kx, ky, kz;
+        if (Math.PI - th > 1e-4)
+        {
+            double s = 2.0 * Math.Sin(th);
+            kx = (R[2, 1] - R[1, 2]) / s; ky = (R[0, 2] - R[2, 0]) / s; kz = (R[1, 0] - R[0, 1]) / s;
+        }
+        else
+        {
+            // Near 180 degrees the antisymmetric part vanishes: take the axis from (R + I) / 2 = k k^T.
+            kx = Math.Sqrt(Math.Max(0, (R[0, 0] + 1) / 2));
+            ky = Math.Sqrt(Math.Max(0, (R[1, 1] + 1) / 2));
+            kz = Math.Sqrt(Math.Max(0, (R[2, 2] + 1) / 2));
+            if (kx >= ky && kx >= kz) { if (R[0, 1] + R[1, 0] < 0) ky = -ky; if (R[0, 2] + R[2, 0] < 0) kz = -kz; }
+            else if (ky >= kz) { if (R[0, 1] + R[1, 0] < 0) kx = -kx; if (R[1, 2] + R[2, 1] < 0) kz = -kz; }
+            else { if (R[0, 2] + R[2, 0] < 0) kx = -kx; if (R[1, 2] + R[2, 1] < 0) ky = -ky; }
+            double n = Math.Sqrt(kx * kx + ky * ky + kz * kz);
+            kx /= n; ky /= n; kz /= n;
+        }
+        return new[] { kx * th, ky * th, kz * th };
     }
 
     static double[,] Rodrigues(double[] r)
