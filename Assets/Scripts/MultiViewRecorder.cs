@@ -95,8 +95,18 @@ public class MultiViewRecorder : MonoBehaviour
     public int maxInFlightEncodes = 8;
     [Tooltip("Auto-stop: end the recording and exit Play mode after this many frames have been captured. 0 = record until stopped manually.")]
     public int maxFrames = 0;
+    [Tooltip("When an auto-stop fires (Max Frames or Record One Loop), also leave Play mode. Off = just end the session and keep playing.")]
+    public bool exitPlayModeOnAutoStop = true;
     [Tooltip("When exactly one camera is recorded, write a flat session layout (rgb/, keyrgb/, bboxes/, keypoints_transforms.json, K.json at the session root) instead of nesting under cam_1/. Multi-camera sessions always use cam_N/.")]
     public bool flatLayoutForSingleCamera = true;
+
+    [Header("Animation loop")]
+    [Tooltip("Record exactly one loop of the first avatar's animation, then stop (and leave Play mode unless 'Exit Play Mode On Auto Stop' is off). " +
+             "One loop = the avatar's current animation state playing once; the recording also stops if that state is left. Needs an avatar with an Animator Controller.")]
+    public bool recordOneLoop = false;
+    [Tooltip("Rewind the avatar's animation to its start when recording begins, so the loop is captured from frame 0 (recommended). " +
+             "Off = record one loop's worth of animation starting from wherever it currently is.")]
+    public bool restartAnimationAtStart = true;
 
     [Header("Frame timing")]
     [Tooltip("Deterministic capture: drive Time.captureFramerate so game time advances a fixed step per frame and every frame is captured regardless of encode speed. NOTE: incompatible with a live VideoPlayer in the scene (starves its decoder). Leave off for real-time capture with frame-dropping.")]
@@ -168,6 +178,12 @@ public class MultiViewRecorder : MonoBehaviour
     int _inFlightEncodes;
     bool acquired;
     bool _stopping;
+    string autoStopReason = "";
+
+    // Record One Loop state.
+    Animator loopAnimator;
+    int loopStateHash;
+    float loopStartNormalized;
 
     // ---------------- Inspector helpers ----------------
 
@@ -214,6 +230,7 @@ public class MultiViewRecorder : MonoBehaviour
         // Play mode. frameCounter counts captures already initiated this session.
         if (maxFrames > 0 && frameCounter >= maxFrames)
         {
+            autoStopReason = $"Max Frames ({maxFrames}) reached";
             _stopping = true;
             StartCoroutine(StopAndExitRoutine());
             return;
@@ -393,8 +410,45 @@ public class MultiViewRecorder : MonoBehaviour
         recordingStartTime = -1.0;
         jsonFirstFrame = true;
         lastCapturedUnityFrame = -1;
+        SetupOneLoop();
         acquired = true;
         Debug.Log($"[MultiViewRecorder] Session started at {sessionPath} with {slots.Count} cameras");
+    }
+
+    // Record One Loop: pick the animation to follow (the first avatar with an Animator Controller), rewind it if
+    // asked, and remember where it starts so LoopCompleted() knows when one full pass has played.
+    void SetupOneLoop()
+    {
+        loopAnimator = null;
+        if (!recordOneLoop) return;
+
+        foreach (var a in avatars)
+            if (a != null && a.isActiveAndEnabled && a.runtimeAnimatorController != null) { loopAnimator = a; break; }
+        if (loopAnimator == null)
+        {
+            Debug.LogWarning("[MultiViewRecorder] Record One Loop: no avatar with an Animator Controller; recording continues until stopped.");
+            return;
+        }
+
+        if (restartAnimationAtStart)
+        {
+            // Replay the current state from its first frame and apply it now, so frame 0 of the recording is the loop's start.
+            loopAnimator.Play(loopAnimator.GetCurrentAnimatorStateInfo(0).fullPathHash, 0, 0f);
+            loopAnimator.Update(0f);
+        }
+        AnimatorStateInfo st = loopAnimator.GetCurrentAnimatorStateInfo(0);
+        loopStateHash = st.fullPathHash;
+        loopStartNormalized = st.normalizedTime;
+        Debug.Log($"[MultiViewRecorder] Record One Loop: following '{loopAnimator.name}', stopping when its animation has played once " +
+                  $"(starts at {loopStartNormalized:F3}).");
+    }
+
+    // True once the followed animation has played a full pass since recording began (or it left that state).
+    bool LoopCompleted()
+    {
+        if (loopAnimator == null || frameCounter == 0) return false;
+        AnimatorStateInfo st = loopAnimator.GetCurrentAnimatorStateInfo(0);
+        return st.fullPathHash != loopStateHash || st.normalizedTime >= loopStartNormalized + 1f;
     }
 
     void EndRecording()
@@ -462,7 +516,8 @@ public class MultiViewRecorder : MonoBehaviour
         record = false;
         EndRecording();
         _stopping = false;
-        Debug.Log($"[MultiViewRecorder] Reached maxFrames ({maxFrames}); stopping Play mode.");
+        Debug.Log($"[MultiViewRecorder] {autoStopReason}; session closed" + (exitPlayModeOnAutoStop ? ", leaving Play mode." : "."));
+        if (!exitPlayModeOnAutoStop) yield break;
 #if UNITY_EDITOR
         UnityEditor.EditorApplication.isPlaying = false;
 #else
@@ -479,6 +534,18 @@ public class MultiViewRecorder : MonoBehaviour
         try
         {
             if (!acquired) yield break;
+
+            // One full pass of the animation has played: don't capture the frame that is already past the end of the loop.
+            if (recordOneLoop && LoopCompleted())
+            {
+                if (!_stopping)
+                {
+                    autoStopReason = $"One animation loop recorded ({frameCounter} frames)";
+                    _stopping = true;
+                    StartCoroutine(StopAndExitRoutine());
+                }
+                yield break;
+            }
 
             int slotCount = slots.Count;
             if (slotCount == 0) yield break;
