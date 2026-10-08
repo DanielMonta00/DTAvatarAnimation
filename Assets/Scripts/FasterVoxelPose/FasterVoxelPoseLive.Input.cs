@@ -8,7 +8,7 @@ using UnityEngine.InputSystem;
 //
 //   mouse   left click  pause / play        wheel  step one frame (down = forward, up = back; the first notch pauses)
 //           left drag   scrub the history (one frame per `dragPixelsPerFrame` pixels; drag left = back in time)
-//   keys    Space pause / play   Left / Right step (hold to repeat)   R rewind   Home / End first / newest frame   M the bar
+//   keys    Space pause / play   Left / Right step (hold to repeat)   R rewind   Home / End first / newest frame   M the bar   H the widget
 //
 // A click on the transport bar (on every display, see FasterVoxelPoseLive.Bar.cs) belongs to its buttons and is not also read as
 // "pause"; the buttons work whether or not the gestures on the picture are enabled.
@@ -21,7 +21,7 @@ public partial class FasterVoxelPoseLive
     float wheelAccum;
     float repeatLeftAt, repeatRightAt;
     bool prevLeftButton;
-    readonly bool[] prevKey = new bool[5]; // space, R, Home, End, M
+    readonly bool[] prevKey = new bool[6]; // space, R, Home, End, M, H
     const float RepeatDelay = 0.4f, RepeatInterval = 0.07f;
 
     void PollInput()
@@ -49,6 +49,7 @@ public partial class FasterVoxelPoseLive
             if (KeyEdge(2, kb.homeKey.isPressed || kb.homeKey.wasPressedThisFrame)) GoToStart();
             if (KeyEdge(3, kb.endKey.isPressed || kb.endKey.wasPressedThisFrame)) GoToNewest();
             if (KeyEdge(4, kb.mKey.isPressed || kb.mKey.wasPressedThisFrame)) showControls = !showControls;
+            if (KeyEdge(5, kb.hKey.isPressed || kb.hKey.wasPressedThisFrame)) showHud = !showHud;
             if (Repeats(!prevRight && kb.rightArrowKey.isPressed || kb.rightArrowKey.wasPressedThisFrame, kb.rightArrowKey.isPressed, ref repeatRightAt)) StepForward();
             if (Repeats(!prevLeft && kb.leftArrowKey.isPressed || kb.leftArrowKey.wasPressedThisFrame, kb.leftArrowKey.isPressed, ref repeatLeftAt)) StepBackward();
             prevRight = kb.rightArrowKey.isPressed; prevLeft = kb.leftArrowKey.isPressed;
@@ -62,6 +63,7 @@ public partial class FasterVoxelPoseLive
             if (Input.GetKeyDown(KeyCode.Home)) GoToStart();
             if (Input.GetKeyDown(KeyCode.End)) GoToNewest();
             if (Input.GetKeyDown(KeyCode.M)) showControls = !showControls;
+            if (Input.GetKeyDown(KeyCode.H)) showHud = !showHud;
             if (Repeats(Input.GetKeyDown(KeyCode.RightArrow), Input.GetKey(KeyCode.RightArrow), ref repeatRightAt)) StepForward();
             if (Repeats(Input.GetKeyDown(KeyCode.LeftArrow), Input.GetKey(KeyCode.LeftArrow), ref repeatLeftAt)) StepBackward();
         }

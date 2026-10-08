@@ -2,54 +2,67 @@ using UnityEngine;
 using UnityEngine.UI;
 
 // Where the controls are on the screen. Pure geometry, shared by what is drawn and by what the pointer hits, so the two cannot
-// disagree. Screen pixels, origin bottom-left (the input system's pointer convention and uGUI's).
+// disagree. Screen pixels, origin bottom-left (the input system's pointer convention and uGUI's). Every edge is a whole pixel:
+// text laid out on a fractional position is resampled and comes out blurry.
 public sealed class FvpBarLayout
 {
     public enum Part { None, ToStart, Rewind, StepBack, PlayPause, StepForward, Replay, ToNewest, Slider, Counter, Mode, Hide, Show }
     public const int PartCount = 13;
-    public const float Pad = 8f, ButtonH = 26f, Gap = 4f, Margin = 4f, ThumbW = 12f;
+    public const float Pad = 8f, ButtonH = 28f, Gap = 4f, Margin = 4f, ThumbW = 12f;
+    public const int FontSize = 14;
 
     // (part, width, space after) at scale 1
     static readonly (Part part, float width, float after)[] Row =
     {
-        (Part.ToStart, 40f, Gap), (Part.Rewind, 40f, Gap), (Part.StepBack, 40f, Gap), (Part.PlayPause, 54f, Gap),
-        (Part.StepForward, 40f, Gap), (Part.Replay, 40f, Gap), (Part.ToNewest, 40f, Gap + 8f),
-        (Part.Slider, 240f, 8f), (Part.Counter, 80f, 0f), (Part.Mode, 112f, Gap), (Part.Hide, 44f, 0f),
+        (Part.ToStart, 44f, Gap), (Part.Rewind, 44f, Gap), (Part.StepBack, 44f, Gap), (Part.PlayPause, 60f, Gap),
+        (Part.StepForward, 44f, Gap), (Part.Replay, 44f, Gap), (Part.ToNewest, 44f, Gap + 8f),
+        (Part.Slider, 240f, 8f), (Part.Counter, 86f, 0f), (Part.Mode, 128f, Gap), (Part.Hide, 50f, 0f),
     };
+    const float ShowWidth = 50f;
 
     public readonly Rect[] rect = new Rect[PartCount];
     public Rect strip;            // the dim backing, margin included
-    public float scale = 1f;      // < 1 when the display is too narrow for the whole bar
+    public float scale = 1f;      // whole multiple for big displays, then shrunk (in eighths) to fit a narrow one
+    public float uiScale = 1f;    // the size of everything: the user's setting, doubled from 1620 px of height up (4K)
     public bool expanded;
     public int version;           // bumped whenever the geometry changed
+    public int Font => Mathf.Max(11, Mathf.RoundToInt(FontSize * scale));
 
     int width = -1, height = -1;
+    float userScale = -1f;
+
+    static Rect R(float x, float y, float w, float h) => new Rect(Mathf.Round(x), Mathf.Round(y), Mathf.Round(w), Mathf.Round(h));
 
     // Returns true when the geometry changed.
-    public bool Compute(int w, int h, bool expanded)
+    public bool Compute(int w, int h, bool expanded, float userScale = 1f)
     {
-        if (w == width && h == height && expanded == this.expanded && version > 0) return false;
-        width = w; height = h; this.expanded = expanded;
+        userScale = Mathf.Clamp(userScale, 0.5f, 4f);
+        if (w == width && h == height && expanded == this.expanded && userScale == this.userScale && version > 0) return false;
+        width = w; height = h; this.expanded = expanded; this.userScale = userScale;
         System.Array.Clear(rect, 0, rect.Length);
 
+        uiScale = userScale * Mathf.Max(1, Mathf.RoundToInt(h / 1080f));
+        float pad = Pad * uiScale, margin = Margin * uiScale;
         if (!expanded)
         {
-            scale = 1f;
-            rect[(int)Part.Show] = new Rect(Pad, Pad, 46f, ButtonH);
-            strip = new Rect(Pad - Margin, Pad - Margin, 46f + 2f * Margin, ButtonH + 2f * Margin);
+            scale = uiScale;
+            rect[(int)Part.Show] = R(pad, pad, ShowWidth * scale, ButtonH * scale);
+            strip = R(pad - margin, pad - margin, rect[(int)Part.Show].width + 2f * margin, rect[(int)Part.Show].height + 2f * margin);
         }
         else
         {
             float total = 0f;
             foreach (var r in Row) total += r.width + r.after;
-            scale = Mathf.Clamp((w - 2f * Pad) / total, 0.5f, 1f);
-            float x = Pad, bh = ButtonH * scale;
+            float fit = Mathf.Clamp((w - 2f * pad) / (total * uiScale), 0.5f, 1f);
+            fit = Mathf.Floor(fit * 8f) / 8f;
+            scale = uiScale * fit;
+            float x = pad, bh = Mathf.Round(ButtonH * scale);
             foreach (var r in Row)
             {
-                rect[(int)r.part] = new Rect(x, Pad, r.width * scale, bh);
-                x += (r.width + r.after) * scale;
+                rect[(int)r.part] = R(x, pad, r.width * scale, bh);
+                x += Mathf.Round((r.width + r.after) * scale);
             }
-            strip = new Rect(Pad - Margin, Pad - Margin, x - Pad + 2f * Margin, bh + 2f * Margin);
+            strip = R(pad - margin, pad - margin, x - pad + 2f * margin, bh + 2f * margin);
         }
         version++;
         return true;
@@ -70,7 +83,7 @@ public sealed class FvpBarLayout
         Rect s = rect[(int)Part.Slider];
         float half = ThumbW * scale * 0.5f;
         float t = count > 1 ? Mathf.Clamp01(cursor / (float)(count - 1)) : 0f;
-        return Mathf.Lerp(s.xMin + half, s.xMax - half, t);
+        return Mathf.Round(Mathf.Lerp(s.xMin + half, s.xMax - half, t));
     }
 
     public int IndexAt(float x, int count)
@@ -89,6 +102,9 @@ public struct FvpBarView
     public int autoDir;                 // -1 rewinding, +1 replaying
     public int cursor, count;
     public FvpBarLayout.Part hover, down;
+
+    public bool Equals(in FvpBarView o) =>
+        paused == o.paused && synced == o.synced && autoDir == o.autoDir && cursor == o.cursor && count == o.count && hover == o.hover && down == o.down;
 }
 
 // The transport bar of ONE display, drawn as uGUI. IMGUI only ever draws on Display 1, so the component makes one of these per
@@ -103,11 +119,14 @@ public sealed class FvpTransportBar
 
     public readonly Canvas canvas;
     public readonly int display;
+    public readonly FvpHud hud;
     readonly GameObject root;
     readonly Image strip, track, fill, thumb;
     readonly Image[] bg = new Image[FvpBarLayout.PartCount];
     readonly Text[] label = new Text[FvpBarLayout.PartCount];
     int appliedVersion;
+    bool appliedAny;
+    FvpBarView appliedView;
 
     public FvpTransportBar(int display)
     {
@@ -117,6 +136,9 @@ public sealed class FvpTransportBar
         canvas.renderMode = RenderMode.ScreenSpaceOverlay;
         canvas.sortingOrder = 300;            // above the skeleton overlays (200 + view)
         canvas.targetDisplay = display;
+        canvas.pixelPerfect = true;           // snap UI elements and glyphs to whole pixels
+
+        hud = new FvpHud(root.transform);
 
         strip = NewImage("Strip", root.transform, Dim);
         track = NewImage("Track", strip.transform, TrackColor);
@@ -129,7 +151,7 @@ public sealed class FvpTransportBar
             var part = (FvpBarLayout.Part)i;
             if (part == FvpBarLayout.Part.Slider) continue;
             bg[i] = NewImage(part.ToString(), strip.transform, Normal);
-            label[i] = FvpOverlay.NewText("Label", bg[i].transform, part == FvpBarLayout.Part.Counter ? TextAnchor.MiddleLeft : TextAnchor.MiddleCenter, 12, shadow: false); // on solid buttons a shadow only smudges
+            label[i] = FvpOverlay.NewText("Label", bg[i].transform, part == FvpBarLayout.Part.Counter ? TextAnchor.MiddleLeft : TextAnchor.MiddleCenter, FvpBarLayout.FontSize, shadow: false);
             Fill(label[i].rectTransform);
             label[i].text = names[i];
             if (part == FvpBarLayout.Part.Counter) bg[i].enabled = false; // text only
@@ -167,19 +189,24 @@ public sealed class FvpTransportBar
 
     public void Apply(FvpBarLayout lay, in FvpBarView v)
     {
+        // Nothing changed since the last frame: leave every uGUI element alone (each write can dirty the canvas).
+        if (appliedAny && appliedVersion == lay.version && appliedView.Equals(v)) return;
+        appliedAny = true;
+        appliedView = v;
+
         if (appliedVersion != lay.version)
         {
             appliedVersion = lay.version;
             Place(strip.rectTransform, lay.strip);
             strip.enabled = true;
-            // the children are positioned in the canvas' space, not the strip's: the strip only paints
+            // the children are positioned relative to the strip's corner: the strip only paints
             for (int i = 1; i < FvpBarLayout.PartCount; i++)
             {
                 if (bg[i] == null) continue;
                 bool on = lay.rect[i].width > 0f;
                 if (bg[i].gameObject.activeSelf != on) bg[i].gameObject.SetActive(on);
                 if (on) Place(bg[i].rectTransform, Local(lay.rect[i], lay.strip));
-                if (on && label[i] != null) label[i].fontSize = Mathf.Max(9, Mathf.RoundToInt(12f * lay.scale));
+                if (on && label[i] != null) label[i].fontSize = lay.Font;
             }
             Rect s = lay.rect[(int)FvpBarLayout.Part.Slider];
             bool slider = s.width > 0f;
@@ -188,8 +215,8 @@ public sealed class FvpTransportBar
             thumb.gameObject.SetActive(slider);
             if (slider)
             {
-                Rect t = Local(new Rect(s.xMin, s.center.y - 2f * lay.scale, s.width, 4f * lay.scale), lay.strip);
-                Place(track.rectTransform, t);
+                float th = Mathf.Max(2f, Mathf.Round(4f * lay.scale / 2f) * 2f); // even, so it centres on a pixel edge
+                Place(track.rectTransform, Local(new Rect(s.xMin, Mathf.Round(s.center.y - th * 0.5f), s.width, th), lay.strip));
             }
         }
 
@@ -217,12 +244,12 @@ public sealed class FvpTransportBar
         {
             bool usable = v.count > 1;
             float x = lay.ThumbX(v.cursor, v.count);
-            float tw = FvpBarLayout.ThumbW * lay.scale, th = (FvpBarLayout.ButtonH - 6f) * lay.scale;
+            float tw = Mathf.Round(FvpBarLayout.ThumbW * lay.scale), th = Mathf.Round((FvpBarLayout.ButtonH - 6f) * lay.scale);
             thumb.enabled = usable;
             fill.enabled = usable;
-            Place(thumb.rectTransform, Local(new Rect(x - tw * 0.5f, sl.center.y - th * 0.5f, tw, th), lay.strip));
-            float h = 4f * lay.scale;
-            Place(fill.rectTransform, Local(new Rect(sl.xMin, sl.center.y - h * 0.5f - 0.0f, Mathf.Max(0f, x - sl.xMin), h), lay.strip));
+            Place(thumb.rectTransform, Local(new Rect(Mathf.Round(x - tw * 0.5f), Mathf.Round(sl.center.y - th * 0.5f), tw, th), lay.strip));
+            float h = Mathf.Max(2f, Mathf.Round(4f * lay.scale / 2f) * 2f);
+            Place(fill.rectTransform, Local(new Rect(sl.xMin, Mathf.Round(sl.center.y - h * 0.5f), Mathf.Max(0f, x - sl.xMin), h), lay.strip));
             Color tcol = TrackColor; if (!usable) tcol.a *= 0.4f;
             if (track.color != tcol) track.color = tcol;
         }

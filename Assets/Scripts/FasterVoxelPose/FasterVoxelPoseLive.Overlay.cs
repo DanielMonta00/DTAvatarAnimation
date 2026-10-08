@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 // What is shown while playing:
@@ -30,7 +31,6 @@ public partial class FasterVoxelPoseLive
     }
 
     OverlayView[] overlayViews;
-    static readonly string GtTag = "<color=#7dff7d>GT</color>", FvpTag = "<color=#ff9a2e>FVP</color>";
 
     // The overlay drawn on camera `view`'s display (null before the first frame).
     public FvpOverlay OverlayOf(int view) => overlayViews != null && view >= 0 && view < overlayViews.Length ? overlayViews[view].overlay : null;
@@ -38,8 +38,11 @@ public partial class FasterVoxelPoseLive
     void LateUpdate()
     {
         if (!Application.isPlaying) return;
+        long start = Stamp();
         UpdateOverlays();
+        RefreshHud();
         UpdateBars();
+        profFrame.ticks += Stamp() - start;
     }
 
     // ---------------- overlays on the camera displays ----------------
@@ -49,6 +52,15 @@ public partial class FasterVoxelPoseLive
 
     // A single step is waiting for its estimate: the camera already shows the new frame, the skeleton is still the old one.
     bool SteppingPending => stepState != StepState.Idle || (inFlight != null && inFlight.fromStep) || (building != null && building.fromStep);
+
+    // Nothing in here may allocate per frame: it runs every rendered frame for every camera.
+    static readonly Vector2[] uvBuf = new Vector2[FvpSkeleton.Count];
+    static readonly bool[] okBuf = new bool[FvpSkeleton.Count];
+    static Color[] gtColors, estColors;
+
+    // The estimate is drawn for the instant it was captured. On the live image it is brought forward by what the person moved
+    // since, but only so far: past this the guess is worse than the lag.
+    const float MaxCompensationSeconds = 1.0f;
 
     void UpdateOverlays()
     {
@@ -90,8 +102,7 @@ public partial class FasterVoxelPoseLive
             bool frozenShown = frozen != null;
             ov.SetImage(frozen);
 
-            FvpPerson[] none = System.Array.Empty<FvpPerson>();
-            System.Collections.Generic.IList<FvpPerson> gt = none;
+            IList<FvpPerson> gt = null;
             if (showGroundTruth)
             {
                 if (f != null && (frozenShown || !live)) gt = f.groundTruth;   // that frame's instant
@@ -106,48 +117,38 @@ public partial class FasterVoxelPoseLive
                                  : sentModels != null && i < sentModels.Length ? sentModels[i] : null;
 
             ov.graphic.Begin();
-            foreach (FvpPerson p in gt) DrawSkeleton(ov, v, model, p, Vector3.zero, true, null);
+            if (gt != null)
+                for (int g = 0; g < gt.Count; g++) DrawSkeleton(ov, v, model, gt[g], Vector3.zero, true);
 
-            int tag = 0;
             if (f != null && showEstimate)
             {
                 // Estimate older than the live image it is drawn on: bring it forward by what the person moved meanwhile.
-                float lag = live && !frozenShown && latencyCompensation ? Mathf.Clamp((float)(Time.timeAsDouble - f.sceneTime), 0f, 0.5f) : 0f;
-                foreach (FvpPerson p in f.people) DrawSkeleton(ov, v, model, p, p.velocity * lag, false, ov, ref tag);
+                float lag = live && !frozenShown && latencyCompensation ? Mathf.Clamp((float)(Time.timeAsDouble - f.sceneTime), 0f, MaxCompensationSeconds) : 0f;
+                List<FvpPerson> people = f.people;
+                for (int k = 0; k < people.Count; k++) DrawSkeleton(ov, v, model, people[k], people[k].velocity * lag, false);
             }
             ov.graphic.End();
-            ov.HideTagsFrom(tag);
-            ov.SetLabel(OverlayLabel(v, f, frozenShown, live), paused ? new Color(1f, 0.82f, 0.45f) : new Color(0.85f, 1f, 0.9f));
         }
     }
 
-    void DrawSkeleton(FvpOverlay ov, OverlayView v, FvpCameraModel model, FvpPerson p, Vector3 shift, bool isGroundTruth, FvpOverlay tags)
+    void DrawSkeleton(FvpOverlay ov, OverlayView v, FvpCameraModel model, FvpPerson p, Vector3 shift, bool isGroundTruth)
     {
-        int unused = 0;
-        DrawSkeleton(ov, v, model, p, shift, isGroundTruth, tags, ref unused);
-    }
-
-    void DrawSkeleton(FvpOverlay ov, OverlayView v, FvpCameraModel model, FvpPerson p, Vector3 shift, bool isGroundTruth, FvpOverlay tags, ref int tag)
-    {
-        var uv = new Vector2[FvpSkeleton.Count];
-        var ok = new bool[FvpSkeleton.Count];
-        var col = new Color[FvpSkeleton.Count];
-        for (int j = 0; j < FvpSkeleton.Count; j++)
+        if (gtColors == null)
         {
-            col[j] = isGroundTruth ? FvpSkeleton.GroundTruthColor(j) : FvpSkeleton.EstimateColor(j);
-            ok[j] = p.IsValid(j) && TryImagePoint(ov, v, model, p.joints[j] + shift, out uv[j]);
+            gtColors = new Color[FvpSkeleton.Count]; estColors = new Color[FvpSkeleton.Count];
+            for (int j = 0; j < FvpSkeleton.Count; j++) { gtColors[j] = FvpSkeleton.GroundTruthColor(j); estColors[j] = FvpSkeleton.EstimateColor(j); }
         }
+        Color[] col = isGroundTruth ? gtColors : estColors;
+        for (int j = 0; j < FvpSkeleton.Count; j++)
+            okBuf[j] = p.IsValid(j) && TryImagePoint(ov, v, model, p.joints[j] + shift, out uvBuf[j]);
 
         for (int e = 0; e < FvpSkeleton.Edges.GetLength(0); e++)
         {
             int a = FvpSkeleton.Edges[e, 0], b = FvpSkeleton.Edges[e, 1];
-            if (ok[a] && ok[b]) ov.graphic.AddLine(uv[a], uv[b], Color.Lerp(col[a], col[b], 0.5f)); // like the dataset images
+            if (okBuf[a] && okBuf[b]) ov.graphic.AddLine(uvBuf[a], uvBuf[b], Color.Lerp(col[a], col[b], 0.5f)); // like the dataset images
         }
         for (int j = 0; j < FvpSkeleton.Count; j++)
-            if (ok[j]) ov.graphic.AddDot(uv[j], col[j]);
-
-        if (!isGroundTruth && overlayTags && tags != null && ok[FvpSkeleton.Neck])
-            tags.Tag(tag++, uv[FvpSkeleton.Neck], $"#{p.id}  {p.score:F2}", col[FvpSkeleton.Neck]);
+            if (okBuf[j]) ov.graphic.AddDot(uvBuf[j], col[j]);
     }
 
     // A world point -> normalized position on the image the camera's display shows (0..1, origin top-left).
@@ -178,21 +179,6 @@ public partial class FasterVoxelPoseLive
         if (vp.z <= v.cam.nearClipPlane) return false;
         uv = new Vector2(vp.x, 1f - vp.y);
         return uv.x > -0.5f && uv.x < 1.5f && uv.y > -0.5f && uv.y < 1.5f;
-    }
-
-    string OverlayLabel(OverlayView v, FvpFrame f, bool frozenShown, bool live)
-    {
-        string cam = v.cam.name.Trim();
-        string state = paused ? (autoDir < 0 ? "REWIND" : autoDir > 0 ? "REPLAY" : "PAUSED") : "LIVE";
-        string legend = (showGroundTruth ? GtTag + " " : "") + (showEstimate ? FvpTag : "");
-        if (f == null) return $"{cam}   {state}   {legend}   {status}";
-
-        string sync = frozenShown ? (live || !paused ? $"synced frame, {f.latencyMs:F0} ms behind live" : "stepped frame")
-                    : live && latencyCompensation ? $"real-time, estimate advanced {f.latencyMs:F0} ms"
-                    : "real-time";
-        string where = history.Count > 0 ? $"{cursor + 1}/{history.Count}" : "-";
-        return $"{cam}   {state}   {legend}   frame {where}   t = {f.sceneTime:F2} s   {f.people.Count} person(s)   {sync}   {estimateFps:F1}/s" +
-               (enableMouse ? "\n<size=11><color=#b8c4d0>click: pause / play    wheel: step a frame    drag: scrub</color></size>" : "");
     }
 
     void EnsureOverlayViews()

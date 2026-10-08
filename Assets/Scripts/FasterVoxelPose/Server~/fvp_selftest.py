@@ -75,6 +75,7 @@ def main():
     ap.add_argument('--spawn', action='store_true', help='start fvp_server.py for the run, stop it afterwards')
     ap.add_argument('--server-args', default='', help='extra arguments for the spawned server, e.g. "--preprocess stretch --no-mask"')
     ap.add_argument('--views', default='1,2,3,4', help='1-based camera indices to send')
+    ap.add_argument('--interval-ms', type=float, default=0.0, help='wait this long after every answer, like a live client that only sends every few hundred ms')
     ap.add_argument('--notebook-poses', default=r'C:/Users/vdmontanacuellar/Documents/Daniel/AProjectPTZCameras/DanielExperiments/Estimation/Faster-VoxelPose/output_multiview/fused_poses_frame120.npy')
     args = ap.parse_args()
 
@@ -183,6 +184,8 @@ def run(args):
         if errs:
             all_abs.append(np.concatenate(errs))
         times.append(rt)
+        if args.interval_ms > 0:
+            time.sleep(args.interval_ms / 1000.0)
         print('frame %4d: %d person(s) (GT %d)  MPJPE %s  net %.0f ms  total %.0f ms  roundtrip %.0f ms' % (
             fi, len(people), len(gt), ('%.1f mm' % np.concatenate(errs).mean()) if errs else 'n/a',
             res['t_net'], res['t_total'], rt))

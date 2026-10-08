@@ -66,8 +66,11 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
     public string serverScript = "";
     public string host = "127.0.0.1";
     public int port = 5577;
-    [Tooltip("The server exits after this many seconds without a client. 0 = never.")]
+    [Tooltip("Start the server as soon as the editor opens this scene (and again when entering Play if it is not running), so the model is loaded and the voxel grids and kernels of the last configuration are built BEFORE Play: it then starts estimating at once. The server stays up until the editor closes.")]
+    public bool startServerWithEditor = true;
+    [Tooltip("The server exits after this many seconds without a client. 0 = never. Ignored (never) while Start Server With Editor is on.")]
     public int serverIdleExitSeconds = 900;
+    public int EffectiveIdleExitSeconds => startServerWithEditor ? 0 : serverIdleExitSeconds;
     [Tooltip("Also stop the server when Play ends. Off keeps the model loaded for the next Play.")]
     public bool stopServerWhenDone = false;
     [Tooltip("Extra arguments for fvp_server.py, e.g. '--preprocess stretch --no-mask' to reproduce the experiment notebook exactly.")]
@@ -127,8 +130,6 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
     [Range(1f, 8f)] public float overlayLineWidth = 2f;
     [Tooltip("Dot radius in pixels of a 1920 px wide image (the dataset images use 4).")]
     [Range(1f, 12f)] public float overlayDotRadius = 4f;
-    [Tooltip("Person id and score next to each estimated neck.")]
-    public bool overlayTags = false;
     [Tooltip("Transport bar (pause / step / rewind / slider) at the bottom of every display. M toggles it.")]
     public bool showControls = true;
     [Tooltip("Mouse on any display: left click = pause / play, wheel = step one frame (down = forward), left drag = scrub through the history. Needs the Game view focused.")]
@@ -401,6 +402,8 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
     void Update()
     {
         if (!Application.isPlaying) return;
+        long frameStart = Stamp();
+        NoteFrame();
 
         PollLogs();
         PumpClient();
@@ -419,6 +422,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
 
         if (WantsCapture()) captureArmed = true;
         UpdateStatus();
+        profFrame.ticks += Stamp() - frameStart;
     }
 
     void PollLogs()
@@ -440,7 +444,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         if (Time.realtimeSinceStartup - enabledAt < 1.5f) return;
 
         string script = string.IsNullOrWhiteSpace(serverScript) ? FvpServerProcess.DefaultScriptPath : serverScript;
-        if (FvpServerProcess.TryLaunch(pythonExe, script, fvpRepo, host, port, serverIdleExitSeconds, ServerArguments, out string err))
+        if (FvpServerProcess.TryLaunch(pythonExe, script, fvpRepo, host, port, EffectiveIdleExitSeconds, ServerArguments, out string err))
         {
             serverLaunched = true;
             serverLaunchReal = Time.realtimeSinceStartup;
@@ -480,7 +484,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
                     if ((int)m.Num("config_id") == configId)
                     {
                         configAcked = true;
-                        Debug.Log($"[FasterVoxelPose] configured in {m.Num("ms"):F0} ms ({sentModels?.Length ?? 0} views, {frameW}x{frameH}).");
+                        Debug.Log($"[FasterVoxelPose] configured in {m.Num("ms"):F0} ms ({sentModels?.Length ?? 0} views, {frameW}x{frameH}){(m.Bool("reused") ? ": voxel grids and kernels were already built" : "")}.");
                     }
                     break;
                 case "result":
@@ -695,6 +699,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         f.fromStep = stepState == StepState.Rendering;
         if (stepState == StepState.Rendering) { CheckStepLength(); stepState = StepState.Idle; }
 
+        long captureStart = Stamp();
         var sync = lowLatencyReadback ? new AsyncGPUReadbackRequest[slots.Length] : null;
         var issued = lowLatencyReadback ? new bool[slots.Length] : null;
         for (int i = 0; i < slots.Length; i++)
@@ -719,6 +724,8 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         if (lowLatencyReadback)
             for (int i = 0; i < slots.Length; i++)
                 if (issued[i]) { sync[i].WaitForCompletion(); OnReadback(gen, f, i, sync[i]); }
+        profCapture.ticks += Stamp() - captureStart;
+        profCapture.calls++;
     }
 
     // The image the camera produces: its lens-distorted output, or (no distortion) a shadow camera's render.
@@ -897,6 +904,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         f.totalMs = (float)m.Num("t_total");
         BuildPeople(f);
         tracker.Assign(f.people, f.sceneTime);
+        CompareWithGroundTruth(f.people, f.groundTruth);
         f.estimated = true;
         f.latencyMs = (Time.realtimeSinceStartup - f.realtime) * 1000f;
 

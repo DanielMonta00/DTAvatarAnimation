@@ -15,6 +15,11 @@ public sealed class FvpMessage
         return json != null && json.TryGetValue(key, out object v) && v is double d ? d : fallback;
     }
 
+    public bool Bool(string key)
+    {
+        return json != null && json.TryGetValue(key, out object v) && v is bool b && b;
+    }
+
     public string Str(string key)
     {
         return json != null && json.TryGetValue(key, out object v) ? v as string : null;

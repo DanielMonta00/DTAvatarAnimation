@@ -15,7 +15,7 @@ public partial class FasterVoxelPoseLive
     public FvpBarLayout BarLayout => barLayout;
     public FvpTransportBar BarOn(int display) => bars != null && display >= 0 && display < bars.Length ? bars[display] : null;
 
-    void EnsureBarLayout() => barLayout.Compute(Screen.width, Screen.height, showControls);
+    void EnsureBarLayout() => barLayout.Compute(Screen.width, Screen.height, showControls, uiScale);
 
     void UpdateBars()
     {
@@ -31,7 +31,11 @@ public partial class FasterVoxelPoseLive
             paused = paused, synced = overlayImage == OverlayImage.SyncedFrame, autoDir = autoDir,
             cursor = cursor, count = history.Count, hover = barHover, down = barDown,
         };
-        foreach (FvpTransportBar b in bars) b.Apply(barLayout, view);
+        foreach (FvpTransportBar b in bars)
+        {
+            b.Apply(barLayout, view);
+            b.hud.Apply(hudData, TitleOf(b.display), barLayout.uiScale);
+        }
     }
 
     void DestroyBars()

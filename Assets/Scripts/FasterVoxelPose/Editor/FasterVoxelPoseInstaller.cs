@@ -112,7 +112,8 @@ public static class FasterVoxelPoseInstaller
     }
 }
 
-// The server this editor session started must not outlive it.
+// The server this editor session started must not outlive it. And it should be up BEFORE Play: the model load, the voxel grids
+// and the kernel tuning of the last configuration then happen while you are still editing, not after you press Play.
 [InitializeOnLoad]
 static class FasterVoxelPoseEditorHooks
 {
@@ -120,8 +121,44 @@ static class FasterVoxelPoseEditorHooks
     {
         EditorApplication.quitting -= OnQuit;
         EditorApplication.quitting += OnQuit;
+        EditorApplication.playModeStateChanged -= OnPlayMode;
+        EditorApplication.playModeStateChanged += OnPlayMode;
+        EditorApplication.delayCall += () => EnsureServer("the editor opened");
     }
 
     static void OnQuit() => FvpServerProcess.Stop();
+
+    static void OnPlayMode(PlayModeStateChange change)
+    {
+        if (change == PlayModeStateChange.ExitingEditMode) EnsureServer("entering Play");
+    }
+
+    static void EnsureServer(string why)
+    {
+        FasterVoxelPoseLive c = UnityEngine.Object.FindFirstObjectByType<FasterVoxelPoseLive>(FindObjectsInactive.Include);
+        if (c == null || !c.enabled || !c.autoLaunchServer || !c.startServerWithEditor) return;
+        if (FvpServerProcess.IsRunning || PortOpen(c.host, c.port)) return;
+
+        string script = string.IsNullOrWhiteSpace(c.serverScript) ? FvpServerProcess.DefaultScriptPath : c.serverScript;
+        if (FvpServerProcess.TryLaunch(c.pythonExe, script, c.fvpRepo, c.host, c.port, c.EffectiveIdleExitSeconds, c.ServerArguments, out string err))
+            Debug.Log($"[FasterVoxelPose] server started ({why}) so that Play finds it ready.");
+        else
+            Debug.LogWarning("[FasterVoxelPose] could not start the server: " + err);
+    }
+
+    // Something (a server of an earlier editor session, one started by hand) already answers on the port.
+    static bool PortOpen(string host, int port)
+    {
+        try
+        {
+            using (var client = new System.Net.Sockets.TcpClient())
+            {
+                System.IAsyncResult r = client.BeginConnect(host, port, null, null);
+                bool ok = r.AsyncWaitHandle.WaitOne(150) && client.Connected;
+                return ok;
+            }
+        }
+        catch { return false; }
+    }
 }
 #endif

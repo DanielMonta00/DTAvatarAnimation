@@ -11,6 +11,8 @@ public sealed class FvpPerson
     public readonly Vector3[] joints = new Vector3[FvpSkeleton.Count]; // metres, Unity world, Panoptic-15 order
     public bool[] valid;     // null = every joint valid (ground truth from a rig can lack joints)
     public Vector3 velocity; // horizontal root velocity, m/s, from the last estimates of this id (zero for a new person)
+    public float errMm = -1f; // mean joint distance to the ground truth at the same instant, mm; < 0 = nothing to compare with
+    public bool ghost;       // there is ground truth, and nobody within a metre of this skeleton
 
     public Vector3 Root => joints[FvpSkeleton.MidHip];
     public Color Color => FvpSkeleton.ColorFor(id);
@@ -147,12 +149,12 @@ public sealed class FvpTracker
 
             double dt = time - previousTime;
             Vector3 v = previous[p].velocity;
-            if (dt > 0.02 && dt < 0.6)
+            if (dt > 0.02 && dt < 1.5)
             {
                 Vector3 raw = (now[n].Root - previous[p].Root) / (float)dt;
                 raw.y = 0f;
                 if (raw.magnitude > maxSpeed) raw = raw.normalized * maxSpeed;
-                v = Vector3.Lerp(previous[p].velocity, raw, 0.5f); // a little smoothing: the estimate is noisy
+                v = Vector3.Lerp(previous[p].velocity, raw, dt > 0.3 ? 0.7f : 0.5f); // a little smoothing (the estimate is noisy), less when estimates are rare
             }
             now[n].velocity = v;
         }

@@ -340,16 +340,23 @@ class Engine:
         self._save_config(msg)
         return (time.perf_counter() - t0) * 1000.0, False
 
-    STATS_EVERY = 100
+    STATS_EVERY = 50
 
-    # One line every STATS_EVERY frames: what the server spends per frame (tells GPU contention apart from slow code).
+    # One line every STATS_EVERY frames (and at the end of a session): what the server spends per frame. It tells a slow
+    # network apart from a GPU that is busy with something else (Unity rendering): the same frames take ~50 ms alone.
     def record(self, pre, net, total):
         self.stats.append((pre, net, total))
         if len(self.stats) >= self.STATS_EVERY:
-            a = np.array(self.stats)
-            log('[fvp] last %d frames: pre %.1f ms, net %.1f ms (max %.0f), total %.1f ms (p95 %.0f)' % (
-                len(a), a[:, 0].mean(), a[:, 1].mean(), a[:, 1].max(), a[:, 2].mean(), np.percentile(a[:, 2], 95)))
+            self.flush_stats()
+
+    def flush_stats(self):
+        if len(self.stats) < 5:
             self.stats = []
+            return
+        a = np.array(self.stats)
+        log('[fvp] last %d frames: pre %.1f ms, net %.1f ms (max %.0f), total %.1f ms (p95 %.0f)' % (
+            len(a), a[:, 0].mean(), a[:, 1].mean(), a[:, 1].max(), a[:, 2].mean(), np.percentile(a[:, 2], 95)))
+        self.stats = []
 
     def _preprocess(self, views):
         cv2, torch = self.cv2, self.torch
@@ -374,11 +381,11 @@ class Engine:
         if self.device.type == 'cuda':
             torch.cuda.synchronize()
         t1 = time.perf_counter()
-        with torch.no_grad(), torch.autocast('cuda', dtype=torch.float16, enabled=self.args.fp16_head and self.device.type == 'cuda'):
+        with torch.no_grad():
             fused, _, centers, _, _ = self.model(
                 backbone=self.backbone, views=inputs, meta={'seq': [SEQ]},
                 cameras=self.cameras, resize_transform=self.resize_transform)
-            poses = fused[0].detach().float().cpu().numpy().astype('<f4')
+            poses = fused[0].detach().cpu().numpy().astype('<f4')
         t2 = time.perf_counter()
         self.last_timing = ((t1 - t0) * 1000.0, (t2 - t1) * 1000.0)
         return poses
@@ -465,6 +472,7 @@ def serve(engine, args):
         except (ConnectionError, OSError) as e:
             log('[fvp] client gone (%s)' % e)
         finally:
+            engine.flush_stats()
             conn.close()
             last_client = time.time()
 
@@ -481,9 +489,9 @@ def main():
     ap.add_argument('--preprocess', choices=['warp', 'stretch'], default='warp',
                     help='warp: aspect-preserving affine like the training data; stretch: plain resize like the notebooks')
     ap.add_argument('--fp16', action='store_true', help='run the 2D backbone in half precision (~15 ms faster per frame)')
-    ap.add_argument('--fp16-head', action='store_true', help='also run the 3D networks (root + joint) in half precision')
-    ap.add_argument('--cudnn', choices=['config', 'on', 'off'], default='config',
-                    help="cudnn autotuning: 'config' follows the repo's yaml (on); 'off' skips the per-shape tuning stalls")
+    ap.add_argument('--cudnn', choices=['config', 'on', 'off'], default='off',
+                    help="cudnn autotuning: 'off' (default) picks kernels by heuristic: same speed and accuracy here, no stall the first "
+                         "time a new shape appears and a cold config about half as long; 'config' follows the repo's yaml (on)")
     ap.add_argument('--warm-people', type=int, default=3,
                     help='pre-tune the per-person 3D networks for 1..N people when a config is built (0 = skip)')
     ap.add_argument('--cache-dir', help='keeps the last config here; the next server start builds its grids from it before any client asks')

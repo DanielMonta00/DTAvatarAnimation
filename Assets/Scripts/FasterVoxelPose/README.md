@@ -6,7 +6,7 @@ cameras of the scene and shows what it finds, live:
 * **ground truth (green) and estimate (orange) drawn over each camera's own display** (cam107 / cam103 / cam120 each
   on the Target Display its `CalibratedCamera` already shows its image on), in the style of the dataset images: thin
   lines, round dots, line colour = average of its two joints; the person's left side lighter and the right side
-  darker in both colours; a status line per display,
+  darker in both colours; a small **status widget** in the corner of every display (see below),
 * the **3D reconstruction as gizmos** (Scene view, or Game view with *Gizmos* on) plus the capture volume box,
 * **pause / frame-by-frame / rewind** controls (mouse: click, wheel, drag) that put the whole scene back, robot included,
 * the poses as plain C# objects (`FvpPerson`) for whatever they will drive next (Bulles, PontRoulant…).
@@ -17,8 +17,12 @@ cameras of the scene and shows what it finds, live:
    `FasterVoxelPoseLive` and wires it from the open scene (cam107 / cam103 / cam120 *main* cameras, the
    `MOCAPcenter` anchor, the scene's Animators). Check the Console line it prints.
    (Or add the component to your own object and press **Auto-wire from scene**.)
-2. Press **Play**. The first time, the Python server starts and loads the model (~10 s; the status line says so).
-   The server then stays up, so the next Play starts instantly.
+2. Press **Play**. The Python server is started **when the editor opens the scene** (and again on entering Play if it is
+   not running), not when Play begins: the model is loaded and the voxel grids and kernels of the last configuration are
+   built while you are still editing, so Play finds it ready and the first configuration answers in 0 ms ("voxel grids
+   and kernels were already built" in the Console). It stays up until the editor closes (`Start Server With Editor`).
+   Only the very first run of a new camera / volume setup builds the grids once (about a second); it is remembered in
+   `Library/FasterVoxelPose/last_config.json`.
 3. Walk someone into the **cyan box** (the capture volume). Resize / move it in the Inspector until it covers the
    floor space you care about: people outside it are not found.
 
@@ -79,16 +83,56 @@ Animators and video players set to *Unscaled Time* ignore `timeScale`; the video
 A script's *serialized* fields are treated as configuration and are not restored: a clock that is a `[SerializeField]` or
 `public` field has to be moved to a private one to rewind.
 
+### The status widget
+
+One small card in the top-left corner of every display (**H** hides it, `Show Hud` in the Inspector) replaces the text that
+used to sit over the pictures: the state (LIVE / PAUSED / REWIND), a legend, the estimates per second, the latency from
+capture to answer, **Unity's own frame rate**, what this tool costs per frame, the frame under the cursor, and one row for
+each person found:
+
+    #1  [bar | tick]  0.16   err 118 mm
+
+* **The score (0.16)** is the network's confidence in that skeleton, between 0 and 1. It is *not* an accuracy: it is how
+  sharp the network's own joint heatmaps are (the code is `SoftArgmaxLayer` in `joint_localization_net.py`: for each joint
+  and each of the three planes it takes the highest softmax value of the heatmap, then averages over joints and planes).
+  A confident joint puts nearly all of the probability in one cell (value near 1); a vague one spreads it out. The
+  network was trained on photographs of people, so avatars come out vague: 0.10-0.23 here, where real footage would be
+  well above that. Separately, a person must clear a gate inside the network (the product of the top-view and the
+  height peaks of the root heatmap) before a skeleton is made at all; `Min Score` is applied to both. The bar is 0.5
+  wide and the tick marks `Min Score`.
+* **err** is the mean distance of the joints to the *green* skeleton of the nearest person, measured at the instant the
+  frame was captured, so it does not suffer from the display lag. Green = good (< 12 cm), yellow, red (> 20 cm). It
+  carries the joint-definition offsets described under Troubleshooting. *nobody there?* means there is ground truth in the
+  scene but none within a metre of this skeleton: a ghost.
+
 ### Keeping image, ground truth and estimate in sync
 
 An estimate describes the frame that was *captured*, which is older than the live camera by the time it took to read the
-frame back, send it, and run the network (the latency printed on each display). Drawn on the live image that shows up
-as a skeleton trailing a walking avatar. `Overlay Image` picks the trade-off (also the **Mode** button on the bar):
+frame back, send it, and run the network (the latency in the widget). Drawn on the live image that shows up as a
+skeleton trailing a walking avatar. Paused, and scrolling back through the frames, everything agrees because the estimate,
+the ground truth and the picture are all of the same frame.
+
+**There is a floor under the lag that the network cannot lower: Unity's frame time.** The images are taken at the end of
+frame *n*, the answer is consumed by the Update of frame *n + 2* at the earliest, so an estimate is on screen at least two
+frames late, and the number of estimates per second can never exceed half the frame rate. At 60 fps that is 33 ms and
+invisible; at 7 fps it is 285 ms and a walking person is about 30 cm ahead of their skeleton. The widget shows Unity's fps and
+warns when this is the case.
+
+**The server is slower next to Unity than alone.** Replaying recorded frames with the GPU otherwise idle, the server needs
+48 ms for the network (53 ms in all, about 19 estimates a second for 3-4 views on the laptop RTX 5000 Ada). In a live session
+with the editor rendering the 16-camera scene, the server's own log (`Logs/fvp_server.log`, one line per 100 frames) read
+**pre 16 ms, net 286 ms (p95 470, max 613)**: about six times slower, because the two share one GPU and one CPU. So both
+parts of the lag are properties of the digital-twin set-up on this laptop (Unity's frame time and a shared GPU), not of the
+network. A real deployment with real cameras has no Unity rendering and keeps the 50-60 ms (plus the cameras' own capture
+and decoding latency, which is not measured here).
+
+`Overlay Image` picks the trade-off (also the **Mode** button on the bar):
 
 * **RealTime** (default) - the display keeps the live camera, nothing is delayed. The ground truth is read from the rig
-  *now* (exact) and the estimate is moved forward by its root's horizontal velocity x latency (`Latency Compensation`,
-  velocity from a small tracker over the last estimates). Good for a walking person; limbs still trail a little and it
-  jumps when someone starts or stops. Paused, the display stays on the live camera, which is frozen on that frame.
+  *now* (exact) and the estimate is moved forward by its root's horizontal velocity x its age, up to a second
+  (`Latency Compensation`; the velocity comes from a small tracker over the last estimates, which accepts estimates up to
+  1.5 s apart). Good for a person walking steadily; limbs still trail a little and it jumps when someone starts or stops.
+  Paused, the display stays on the live camera, which is frozen on that frame.
 * **SyncedFrame** - each display shows *the very frame the estimate was made from*: a full-resolution GPU copy of the
   camera image taken at capture, with the ground truth read from the rig at that same instant. Image, green and
   orange always agree; the picture is as old as the latency and updates at the estimate rate.
@@ -172,6 +216,7 @@ fvp.FrameEstimated += frame =>              // every new estimate, main thread
 | `FasterVoxelPoseLive*.cs` | the component (core + capture, playback, mouse / keyboard input, overlay + transport bar, gizmos) |
 | `FvpOverlay.cs`, `FvpOverlayGraphic.cs` | the per-display overlay canvas and its skeleton mesh |
 | `FvpTransportBar.cs`, `FasterVoxelPoseLive.Bar.cs` | the transport bar (uGUI, one canvas per display) and its hit-testing |
+| `FvpHud.cs`, `FasterVoxelPoseLive.Hud.cs` | the status widget, the cost counters and the comparison with the ground truth |
 | `FvpClient.cs`, `FvpProtocol.cs` | socket link and wire format (shared with the server) |
 | `FvpCameraModel.cs` | camera model + the projection behind the overlay (UnityEngine-free) |
 | `FvpHistory.cs`, `FvpSkeleton.cs` | frames / people / tracker, joint data |
@@ -214,8 +259,29 @@ fvp.FrameEstimated += frame =>              // every new estimate, main thread
 * **No overlay on a display** – the overlay is a screen-space canvas on the camera's *Target Display*; make sure the
   Game view shows that display (Display 1 / 2 / 3) and that *Show Overlay* is on. The transport bar does not depend on
   it: it is drawn on all 8 displays (a canvas each) and only needs the Game view focused to take the mouse.
-* **Estimates/s is low** – the GPU is shared with Unity's rendering of three 1080p lens-distorted cameras; lower
-  `Frame Width` or the cameras' resolution.
+* **Estimates/s is low, the estimate trails the avatar, the game is not smooth** – look at the widget: if *Unity* shows a
+  low fps, that is the cause (see above), and *this tool* shows the part of it that is ours (a fraction of a millisecond per
+  frame, and a few milliseconds per capture). What costs Unity time is rendering: each enabled camera renders the whole scene
+  every frame (the scene file has 16 cameras and about 1,360 renderers), and every `CalibratedCamera` adds a full-screen lens
+  remap on top of its render. The widget warns when many
+  more cameras render than FVP reads: disable the ones nobody looks at (for instance the second set of cam107 / cam103 /
+  cam120 under `CalibratedCameras` if only the recorder's set is used), lower the cameras' resolution, or set the Game
+  view to a smaller size. The server shares the GPU with Unity: the *latency* line shows the server's part. Other
+  applications do not matter: with Teams, Edge, VS Code and a PDF viewer open (GPU use under 2 %, CPU 6 %, AC power, High
+  performance plan) the same replay ran at 31 ms for the network, steady to within 4 ms; the slowdown only appears while
+  the editor renders. Inside the editor, a visible **Scene view** is a second full render of the scene next to the Game view:
+  close it or tab away from it during Play (or use *Maximize On Play*), and switch the Game view's Gizmos off. The server
+  logs `last N frames: pre .. net .. total ..` to `Logs/fvp_server.log` every 50 frames and at the end of every session, so
+  every Play leaves its own number.
+* **The text looks soft** – first check the *render* line of the widget (it is the size Unity renders that display at) against
+  the size the Game view window really has. If the window is bigger, the Game view is **magnifying** the render and every
+  pixel of text is stretched: a 14 px label comes out as 17-18 blurred pixels. A bar that measures 1.25 x its layout width
+  (about 880 px at `UI Scale` 1) is the signature. Fix it in the Game view toolbar: **Scale** to 1x and **Low Resolution
+  Aspect Ratios** off (on a display at 125 % Windows scaling that option renders at 80 % and stretches it back), and no
+  fixed resolution smaller than the window. Then, if the text is now sharp but small, raise `UI Scale` (1.25 for a 125 %
+  display): fonts are whole pixel sizes and every edge sits on a whole pixel, so a bigger UI stays crisp where a magnified
+  Game view cannot. The text itself is a regular-weight Segoe UI with a pixel-snapped canvas; rendered 1:1 in the test
+  project it is sharp.
 * **A lens-distorted camera view is black** (typically right after a Library rebuild) – `LensDistortionRenderer` sets
   the shader uniform `_LutMap` once when it is created, and Unity can drop that call for a uniform the shader does not
   declare while the shader is still uncompiled. Declaring it in `LensDistortionRemap.shader` fixes it:
@@ -226,5 +292,12 @@ fvp.FrameEstimated += frame =>              // every new estimate, main thread
   `Rewind Scripts` and be a private non-serialized field; anything driven by `Time.time` cannot be put back.
 * **"a step advanced the scene by X ms instead of Step Seconds"** – something else owns the frame time
   (`Time.captureFramerate`, a fixed-step mode); steps are still exactly one frame, just not `Step Seconds` long.
-* Stop the server: **Tools ▸ FasterVoxelPose ▸ Stop inference server** (it also quits by itself after 15 idle minutes
-  and when the editor closes).
+* Stop the server: **Tools ▸ FasterVoxelPose ▸ Stop inference server** (it quits when the editor closes; with
+  `Start Server With Editor` off it also quits by itself after `Server Idle Exit Seconds`, and Play starts it again).
+  It starts again by itself the next time you enter Play.
+* **Server flags** (`Extra Server Args`): `--cudnn on` restores the repo's kernel autotuning (default off: same speed and
+  accuracy here, no stall the first time a new number of people appears, a cold configuration about half as long),
+  `--warm-people N` (default 3) pre-tunes the per-person networks for 1..N people when a configuration is built,
+  `--cache-dir <dir>` where the last configuration is kept. Running the 3D networks in half precision was tried and
+  finds nobody, so only the backbone uses `--fp16`. Every 100 frames the server logs its own timing
+  ("last 100 frames: pre ... net ... total ...") to `Logs/fvp_server.log`.

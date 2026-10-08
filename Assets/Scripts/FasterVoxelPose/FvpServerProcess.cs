@@ -28,6 +28,19 @@ public static class FvpServerProcess
         }
     }
 
+    // Where the server keeps the last configuration it was given (the next start builds its voxel grids from it).
+    public static string CacheDir
+    {
+        get
+        {
+#if UNITY_EDITOR
+            return Path.GetFullPath(Path.Combine(Application.dataPath, "..", "Library", "FasterVoxelPose"));
+#else
+            return Path.Combine(Application.persistentDataPath, "FasterVoxelPose");
+#endif
+        }
+    }
+
     public static string DefaultScriptPath =>
         Path.GetFullPath(Path.Combine(Application.dataPath, "Scripts", "FasterVoxelPose", "Server~", "fvp_server.py"));
 
@@ -85,6 +98,7 @@ public static class FvpServerProcess
             args.Append(" --host ").Append(host).Append(" --port ").Append(port);
             args.Append(" --idle-exit ").Append(idleExitSeconds);
             args.Append(" --log-file \"").Append(LogPath).Append('"');
+            args.Append(" --cache-dir \"").Append(CacheDir).Append('"');
             if (!string.IsNullOrWhiteSpace(extraArgs)) args.Append(' ').Append(extraArgs);
 
             var psi = new ProcessStartInfo
