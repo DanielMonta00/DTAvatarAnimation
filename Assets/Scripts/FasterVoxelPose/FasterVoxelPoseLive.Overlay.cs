@@ -41,6 +41,7 @@ public partial class FasterVoxelPoseLive
         long start = Stamp();
         UpdateOverlays();
         RefreshHud();
+        RefreshHeat();
         UpdateBars();
         profFrame.ticks += Stamp() - start;
     }

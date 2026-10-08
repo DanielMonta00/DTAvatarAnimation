@@ -11,7 +11,10 @@ using System.Text;
 //
 //   Unity -> server   config   cameras + capture volume          frame   V synced RGB views (bin)
 //                     ping, shutdown
-//   server -> Unity   hello, config_ok, result (bin = float32 [people, joints, 5]), pong, error
+//   server -> Unity   hello, config_ok, pong, error
+//                     result: bin = float32 [people, joints, 5] (poses_bytes long), then, if the frame asked for it ("heat": 1),
+//                     uint8 [heat_views, heat_h, heat_w]: the 2D joint heatmaps in the geometry of the sent frame at 1/4 size,
+//                     255 = 1.0, for the joint "heat_joint" (-1: the strongest of all joints)
 public static class FvpProtocol
 {
     public const uint Magic = 0x31505646; // 'F' 'V' 'P' '1'
@@ -110,14 +113,17 @@ public static class FvpProtocol
         return sb.Append("]}").ToString();
     }
 
-    public static string BuildFrameJson(int id, int configId, int views, int width, int height, float minScore) =>
+    // heatJoint: < -1 = no heatmaps; -1 = the strongest of all joints; 0..14 = that joint (Panoptic order)
+    public static string BuildFrameJson(int id, int configId, int views, int width, int height, float minScore, int heatJoint = -2) =>
         "{\"type\":\"frame\",\"id\":" + id + ",\"config_id\":" + configId + ",\"views\":" + views +
-        ",\"width\":" + width + ",\"height\":" + height + ",\"min_score\":" + F(Math.Round(minScore, 4)) + "}";
+        ",\"width\":" + width + ",\"height\":" + height + ",\"min_score\":" + F(Math.Round(minScore, 4)) +
+        (heatJoint >= -1 ? ",\"heat\":1,\"heat_joint\":" + heatJoint : "") + "}";
 
-    // float32 [people, joints, 5] -> float[]
-    public static float[] DecodePoses(byte[] bin)
+    // float32 [people, joints, 5] -> float[]; `bytes` = how much of the payload is poses (the rest is heatmaps)
+    public static float[] DecodePoses(byte[] bin, int bytes = -1)
     {
-        var f = new float[bin.Length / 4];
+        if (bytes < 0 || bytes > bin.Length) bytes = bin.Length;
+        var f = new float[bytes / 4];
         Buffer.BlockCopy(bin, 0, f, 0, f.Length * 4); // the wire is little-endian; so is every Unity platform
         return f;
     }

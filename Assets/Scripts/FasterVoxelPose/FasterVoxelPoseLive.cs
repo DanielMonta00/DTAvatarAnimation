@@ -388,6 +388,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         DestroySlots();
         DestroyOverlays();
         DestroyBars();
+        DestroyHeat();
         // Worker threads may still be sending / encoding: their buffers are simply left to the GC.
         releaseWatch.Clear();
         FvpBufferPool.Clear();
@@ -793,7 +794,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
 
         var parts = new List<ArraySegment<byte>>(f.raw.Length);
         foreach (byte[] b in f.raw) parts.Add(new ArraySegment<byte>(b, 0, b.Length));
-        string json = FvpProtocol.BuildFrameJson(f.id, configId, f.raw.Length, f.width, f.height, minScore);
+        string json = FvpProtocol.BuildFrameJson(f.id, configId, f.raw.Length, f.width, f.height, minScore, HeatRequest);
         if (!client.Send(json, parts, () => Interlocked.Decrement(ref f.pendingOps)))
         {
             f.evicted = true; // link down or queue full: nothing is coming back for this one
@@ -899,7 +900,8 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         FvpFrame f = inFlight;
         inFlight = null;
 
-        f.poses = FvpProtocol.DecodePoses(m.bin);
+        f.poses = FvpProtocol.DecodePoses(m.bin, (int)m.Num("poses_bytes", m.bin.Length));
+        ReadHeat(f, m);
         f.netMs = (float)m.Num("t_net");
         f.totalMs = (float)m.Num("t_total");
         BuildPeople(f);
@@ -917,6 +919,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         lastResultReal = now;
 
         AppendToHistory(f);
+        OnHeatFrame(f);
         FrameEstimated?.Invoke(f);
     }
 

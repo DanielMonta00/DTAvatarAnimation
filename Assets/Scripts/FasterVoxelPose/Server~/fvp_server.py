@@ -18,7 +18,8 @@ Wire format, little-endian, one packet per message in both directions:
                        frame    one synced set of RGB views, top-left origin, bin = V*H*W*3 bytes
                        ping / shutdown
     server -> client   hello    sent on connect
-                       config_ok, result (bin = float32 [max_people, 15, 5]), pong, error
+                       config_ok, result (bin = float32 [max_people, 15, 5], then, when the frame asked for it with
+                       "heat": 1, uint8 [views, h, w] 2D joint heatmaps: see Engine.heat_maps), pong, error
 
 A pose row is [x, y, z, valid, score] in the model frame: millimetres, Z up (Unity world
 rotated by A = Rot_x(90), see the Unity component). valid >= 0 means a detected person.
@@ -134,6 +135,7 @@ class Engine:
         self.config_id = None
         self.config_sig = None       # what the current head was built for (see same_config)
         self.stats = []              # (pre ms, net ms, total ms) of the last frames, logged every STATS_EVERY
+        self.last_heat = None
         self.cameras = None
         self.resize_transform = None
         self.trans_np = None
@@ -373,7 +375,34 @@ class Engine:
         t = (t - self.mean) / self.std
         return t.unsqueeze(0)  # (1, V, 3, H, W)
 
-    def infer(self, views, min_score):
+    # The 2D stage of the network (the ResNet) gives every view one heatmap per joint; the 3D stages only ever see those, lifted
+    # into the voxel volume. They live at 1/4 of the network input (240 x 128), in the network's letterboxed geometry. This
+    # returns them in the geometry of the frame that was sent, at 1/4 of its size (e.g. 240 x 135), so a client can lay them
+    # straight over the picture: uint8 [views, h, w], 255 = a heatmap value of 1. `joint` < 0 = the strongest of all joints.
+    def heat_maps(self, heat_in, joint):
+        torch, cv2 = self.torch, self.cv2
+        hm = heat_in[0].detach()                                   # (views, joints, 128, 240)
+        hm = hm.max(dim=1).values if joint < 0 else hm[:, min(int(joint), hm.shape[1] - 1)]
+        hm = (hm.float().clamp(0.0, 1.0) * 255.0).round().to(torch.uint8).cpu().numpy()
+        fw, fh = self.frame_size
+        ow, oh = max(1, fw // 4), max(1, fh // 4)
+        out = np.empty((hm.shape[0], oh, ow), np.uint8)
+        M = self._heat_matrix(fw, fh, ow, oh, hm.shape[2], hm.shape[1])
+        for v in range(hm.shape[0]):
+            out[v] = cv2.warpAffine(hm[v], M, (ow, oh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        return out
+
+    # heatmap cell -> network input pixel -> frame pixel -> output cell, all on pixel centres
+    def _heat_matrix(self, fw, fh, ow, oh, hw, hh):
+        net_w, net_h = int(self.config.DATASET.IMAGE_SIZE[0]), int(self.config.DATASET.IMAGE_SIZE[1])
+        sx, sy = net_w / float(hw), net_h / float(hh)                # 4, 4
+        heat_to_net = np.array([[sx, 0, (sx - 1) / 2.0], [0, sy, (sy - 1) / 2.0], [0, 0, 1]])
+        net_to_frame = np.linalg.inv(np.vstack([self.trans_np, [0, 0, 1]]))
+        fx, fy = fw / float(ow), fh / float(oh)
+        frame_to_out = np.array([[1 / fx, 0, -(fx - 1) / (2 * fx)], [0, 1 / fy, -(fy - 1) / (2 * fy)], [0, 0, 1]])
+        return (frame_to_out @ net_to_frame @ heat_to_net)[:2]
+
+    def infer(self, views, min_score, heat_joint=None):
         torch = self.torch
         t0 = time.perf_counter()
         inputs = self._preprocess(views)
@@ -381,11 +410,14 @@ class Engine:
         if self.device.type == 'cuda':
             torch.cuda.synchronize()
         t1 = time.perf_counter()
+        self.last_heat = None
         with torch.no_grad():
-            fused, _, centers, _, _ = self.model(
+            fused, _, centers, heat_in, _ = self.model(
                 backbone=self.backbone, views=inputs, meta={'seq': [SEQ]},
                 cameras=self.cameras, resize_transform=self.resize_transform)
             poses = fused[0].detach().cpu().numpy().astype('<f4')
+            if heat_joint is not None:
+                self.last_heat = self.heat_maps(heat_in, heat_joint)
         t2 = time.perf_counter()
         self.last_timing = ((t1 - t0) * 1000.0, (t2 - t1) * 1000.0)
         return poses
@@ -425,13 +457,21 @@ def handle_client(conn, engine, args):
                     continue
                 views = np.frombuffer(binary, np.uint8).reshape(v, h, w, 3)
                 t0 = time.perf_counter()
-                poses = engine.infer(views, float(msg.get('min_score', 0.1)))
+                want_heat = bool(msg.get('heat'))
+                poses = engine.infer(views, float(msg.get('min_score', 0.1)),
+                                     heat_joint=int(msg.get('heat_joint', -1)) if want_heat else None)
                 total = (time.perf_counter() - t0) * 1000.0
                 engine.record(engine.last_timing[0], engine.last_timing[1], total)
-                send_packet(conn, {'type': 'result', 'id': msg.get('id'), 'config_id': engine.config_id,
-                                   'people': int(poses.shape[0]), 'joints': int(poses.shape[1]),
-                                   't_pre': engine.last_timing[0], 't_net': engine.last_timing[1],
-                                   't_total': total}, poses.tobytes())
+                reply = {'type': 'result', 'id': msg.get('id'), 'config_id': engine.config_id,
+                         'people': int(poses.shape[0]), 'joints': int(poses.shape[1]),
+                         't_pre': engine.last_timing[0], 't_net': engine.last_timing[1],
+                         't_total': total, 'poses_bytes': int(poses.nbytes)}
+                payload = poses.tobytes()
+                if engine.last_heat is not None:
+                    hv, hh, hw = engine.last_heat.shape
+                    reply.update({'heat_views': hv, 'heat_h': hh, 'heat_w': hw, 'heat_joint': int(msg.get('heat_joint', -1))})
+                    payload += engine.last_heat.tobytes()
+                send_packet(conn, reply, payload)
             elif kind == 'ping':
                 send_packet(conn, {'type': 'pong'})
             elif kind == 'shutdown':

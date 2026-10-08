@@ -85,6 +85,10 @@ public sealed class FvpFrame
     public int frozenBuffer = -1;
     public int[] frozenSerial;
     public float netMs, totalMs;
+    // The 2D joint heatmaps of every view, laid over the sent frame (see FvpProtocol): [view][y * heatW + x], 255 = 1.0.
+    // heatJoint is the joint they are for (-1 = the strongest of all). Null when not asked for or the server is older.
+    public byte[][] heat;
+    public int heatW, heatH, heatJoint = -2;
     public float latencyMs;        // capture -> estimate in hand
     public bool fromStep;          // captured by a single step while paused
     public bool estimated;

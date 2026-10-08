@@ -7,6 +7,7 @@ cameras of the scene and shows what it finds, live:
   on the Target Display its `CalibratedCamera` already shows its image on), in the style of the dataset images: thin
   lines, round dots, line colour = average of its two joints; the person's left side lighter and the right side
   darker in both colours; a small **status widget** in the corner of every display (see below),
+* the network's own **2D joint heatmaps painted over each camera's image** in a corner panel (see below),
 * the **3D reconstruction as gizmos** (Scene view, or Game view with *Gizmos* on) plus the capture volume box,
 * **pause / frame-by-frame / rewind** controls (mouse: click, wheel, drag) that put the whole scene back, robot included,
 * the poses as plain C# objects (`FvpPerson`) for whatever they will drive next (Bulles, PontRoulant…).
@@ -104,6 +105,27 @@ each person found:
   frame was captured, so it does not suffer from the display lag. Green = good (< 12 cm), yellow, red (> 20 cm). It
   carries the joint-definition offsets described under Troubleshooting. *nobody there?* means there is ground truth in the
   scene but none within a metre of this skeleton: a ghost.
+
+### The 2D heatmaps: what the 3D stage actually sees
+
+VoxelPose and Faster-VoxelPose are *lifted 2D* methods. A ResNet-50 first gives every camera one 2D heatmap per joint (240 x
+128 cells, a quarter of the network's 960 x 512 input). The 3D stages never see the pictures again: every voxel of the volume
+is projected into each view, samples those heatmaps there and averages over the views, and the 3D CNNs read joints out of that
+lifted evidence. So a joint that is weak or misplaced in the 2D maps is weak or misplaced in 3D.
+
+The top-right corner of every display shows, for the camera(s) that display shows (all of them on a display that shows none),
+the map painted over the very image it was computed from (inferno colours, transparent where the network sees nothing),
+labelled with the joint and the strongest value in it. **J** steps to the next joint (**Shift+J** back; -1 is "the strongest
+of all joints"), **G** hides the panel. `heatmapJoint`, `showHeatmaps` and `heatHistoryFrames` are Inspector fields.
+
+* The server returns the maps already warped back into the geometry of the frame that was sent, at 1/4 of its size (240 x 135
+  for 960 x 540), as one byte per cell: about 100 KB per estimate. Checked against the recording's true 2D joints through the
+  real protocol: the neck map's peak lands a median of 6.4 px from the true neck in a 1280 x 720 frame (100 % within 20 px).
+* The joint is chosen per estimate (the server sends only the one asked for): a change applies from the next estimate, and
+  frames in the history keep the map they were made with (the newest `Heat History Frames`, 300 by
+  default, keep theirs; older ones show a note). The image under the map is kept for the newest estimate only.
+* How to read it: a tight bright blob on the body = the network is sure and right. A blob beside the joint = a 2D error of
+  that many pixels, which at 4 m is 6.7 mm a pixel. A smeared or faint blob (peak under 0.4) = the 3D joint will be a guess.
 
 ### Keeping image, ground truth and estimate in sync
 
@@ -217,6 +239,8 @@ fvp.FrameEstimated += frame =>              // every new estimate, main thread
 | `FvpOverlay.cs`, `FvpOverlayGraphic.cs` | the per-display overlay canvas and its skeleton mesh |
 | `FvpTransportBar.cs`, `FasterVoxelPoseLive.Bar.cs` | the transport bar (uGUI, one canvas per display) and its hit-testing |
 | `FvpHud.cs`, `FasterVoxelPoseLive.Hud.cs` | the status widget, the cost counters and the comparison with the ground truth |
+| `FvpHeatPanel.cs`, `FasterVoxelPoseLive.Heat.cs` | the 2D heatmap panel: receiving the maps, colour map, textures, J / G |
+| `Server~/fvp_diagnose.py` | splits the error of a recorded session into 2D detector, 3D result and number of views |
 | `FvpClient.cs`, `FvpProtocol.cs` | socket link and wire format (shared with the server) |
 | `FvpCameraModel.cs` | camera model + the projection behind the overlay (UnityEngine-free) |
 | `FvpHistory.cs`, `FvpSkeleton.cs` | frames / people / tracker, joint data |
@@ -248,6 +272,28 @@ fvp.FrameEstimated += frame =>              // every new estimate, main thread
      are described to the server (checked against rendered spheres to 0.1 px, lens distortion included), so even the
      *placeholder* extrinsics of cam103 / cam120 are consistent with what they show. They would only matter for real
      footage shot by the real cameras.
+* **Joints badly estimated even though nothing hides them** – the error is made in the 2D stage, not in the lifting, and it
+  is large for a network that has never seen this kind of image. `python Server~/fvp_diagnose.py` splits it on the recorded
+  session (38 frames, 2 people whose hips never rise above 0.56 m, i.e. seated or crouching, 4 cameras at 2.7 m, a person 170 px
+  tall at 4.2 m, i.e. 6.7 mm a pixel):
+
+  | joint | 2D heatmap peak, median error | heatmap value | 3D error (4 views) | 3D, 3 views |
+  |---|---|---|---|---|
+  | neck | 8 px (98 % within 20 px) | 0.79 | 37 mm | 55 mm |
+  | shoulders, elbows, wrists, hips | 13-18 px (62-77 %) | 0.56-0.69 | 100-170 mm | 120-220 mm |
+  | knees | 36-44 px (26-34 %) | 0.43-0.46 | 250-290 mm | 280-310 mm |
+  | ankles | 24-27 px (40-42 %) | 0.38-0.39 | 210-280 mm | 250-300 mm |
+
+  The 3D answer reprojected into the images is as close to the truth as the 2D peaks are (5-16 px for the neck and torso,
+  25-36 px for the legs), so calibration and lifting add nothing: 15 px at 6.7 mm a pixel *is* the 10 cm of 3D error, and a
+  40 px knee is 27 cm. The legs are worst because they are thin, dark against a grey floor, foreshortened and overlapping
+  the chair when seen from 2.7 m up, and because this network (checkpoints trained on the CMU Panoptic dome: as far as I know
+  real, mostly upright people, 5 views, larger in the frame; not measured here) has not been trained on avatars in PPE in
+  these poses. Part of the torso error is the joint
+  convention of the rig against Panoptic's labels (see the offset item above). Every camera you lose costs accuracy: the
+  four 3-view subsets give 167, 174, 177 and 198 mm against 154 mm for four. What would fix it is fine-tuning the 2D
+  backbone on renders from this scene (the recorder already writes the 2D joint positions it needs); moving cameras closer
+  or lower, or adding a view, helps by making people larger and adding evidence. The heatmap panel shows it live.
 * **An extra person that is not there ("ghost")** – a skeleton with a low score (0.1-0.2) standing where nobody is,
   usually 1-2 m from a real person, for a frame or a few. The network lifts people out of a 3D grid built from all
   views, and body parts of one person seen by two cameras can add up to a second person where their lines of sight

@@ -35,6 +35,7 @@ public partial class FasterVoxelPoseLive
         {
             b.Apply(barLayout, view);
             b.hud.Apply(hudData, TitleOf(b.display), barLayout.uiScale);
+            b.heat.Apply(heatData, b.display, barLayout.uiScale);
         }
     }
 

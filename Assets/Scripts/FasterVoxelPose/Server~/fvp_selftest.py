@@ -48,6 +48,34 @@ def camera_message(c):
             'k': [0, 0, 0], 'p': [0, 0]}
 
 
+PRED_TO_GT_NAME = {0: 'neck', 3: 'left_shoulder', 4: 'left_elbow', 5: 'left_wrist', 6: 'left_hip', 7: 'left_knee', 8: 'left_ankle',
+                   9: 'right_shoulder', 10: 'right_elbow', 11: 'right_wrist', 12: 'right_hip', 13: 'right_knee', 14: 'right_ankle'}
+
+
+def check_heat(res, blob, fr, cams, gt_idx, kt, h, joint):
+    """Strongest heatmap peak (in sent-frame pixels) against the true 2D position of the nearest person's joint."""
+    name = PRED_TO_GT_NAME.get(joint)
+    hv, hh, hw = res['heat_views'], res['heat_h'], res['heat_w']
+    maps = np.frombuffer(blob, np.uint8).reshape(hv, hh, hw)
+    out = []
+    if name is None:
+        return out
+    fx, fy = res.get('frame_w', hw * 4) / hw, h / hh
+    for vi, c in enumerate(cams):
+        y, x = np.unravel_index(np.argmax(maps[vi]), maps[vi].shape)
+        if maps[vi][y, x] < 20:
+            continue
+        peak = np.array([x * fx + (fx - 1) / 2.0, y * fy + (fy - 1) / 2.0])
+        truth = []
+        for pr in fr['persons']:
+            pc = pr['keypoints'][gt_idx[name]]['per_camera'][c['index'] - 1]
+            if pc['visible']:
+                truth.append(np.array([pc['image_position'][0], h - pc['image_position'][1]]))  # the dataset's origin is bottom-left
+        if truth:
+            out.append(min(np.linalg.norm(peak - t) for t in truth))
+    return out
+
+
 def parse_frames(spec, n):
     if ':' in spec:
         a, b, s = (int(x) for x in spec.split(':'))
@@ -75,6 +103,8 @@ def main():
     ap.add_argument('--spawn', action='store_true', help='start fvp_server.py for the run, stop it afterwards')
     ap.add_argument('--server-args', default='', help='extra arguments for the spawned server, e.g. "--preprocess stretch --no-mask"')
     ap.add_argument('--views', default='1,2,3,4', help='1-based camera indices to send')
+    ap.add_argument('--heat-joint', type=int, default=None,
+                    help='ask for the 2D heatmaps of this Panoptic joint (0 neck, 3 l-shoulder, 7 l-knee, 8 l-ankle... -1 = all) and check them against the true 2D joint positions')
     ap.add_argument('--interval-ms', type=float, default=0.0, help='wait this long after every answer, like a live client that only sends every few hundred ms')
     ap.add_argument('--notebook-poses', default=r'C:/Users/vdmontanacuellar/Documents/Daniel/AProjectPTZCameras/DanielExperiments/Estimation/Faster-VoxelPose/output_multiview/fused_poses_frame120.npy')
     args = ap.parse_args()
@@ -138,6 +168,7 @@ def run(args):
     print('config reply:', reply, '(%.1f s round trip)' % (time.time() - t0))
     assert reply['type'] == 'config_ok', reply
 
+    heat_stats = []
     all_abs, times, signed = [], [], []
     matched_scores, ghosts = [], []
     first = None
@@ -149,14 +180,19 @@ def run(args):
             imgs.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
         payload = np.stack(imgs).tobytes()
         t0 = time.time()
-        send_packet(sock, {'type': 'frame', 'id': fi, 'config_id': 1, 'views': len(imgs), 'width': w, 'height': h,
-                           'min_score': 0.1}, payload)
+        frame_msg = {'type': 'frame', 'id': fi, 'config_id': 1, 'views': len(imgs), 'width': w, 'height': h, 'min_score': 0.1}
+        if args.heat_joint is not None:
+            frame_msg.update({'heat': 1, 'heat_joint': args.heat_joint})
+        send_packet(sock, frame_msg, payload)
         res, binary = read_packet(sock)
         rt = (time.time() - t0) * 1000
         if res['type'] != 'result':
             print('frame', fi, '->', res)
             continue
-        poses = np.frombuffer(binary, '<f4').reshape(res['people'], res['joints'], 5)
+        pb = res.get('poses_bytes', len(binary))
+        poses = np.frombuffer(binary[:pb], '<f4').reshape(res['people'], res['joints'], 5)
+        if args.heat_joint is not None and 'heat_views' in res:
+            heat_stats.extend(check_heat(res, binary[pb:], fr, cams, gt_idx, kt, h, args.heat_joint))
         if first is None and fi == 120:
             first = poses
         people = poses[poses[:, 0, 3] >= 0]
@@ -194,6 +230,11 @@ def run(args):
         a = np.concatenate(all_abs)
         print('\nMPJPE absolute over %d joints: %.1f mm (median %.1f)  PCK@150 %.1f %%   mean round trip %.0f ms' % (
             len(a), a.mean(), np.median(a), (a < 150).mean() * 100, np.mean(times)))
+    if heat_stats:
+        e = np.array(heat_stats)
+        print('\n2D heatmap of joint %d, laid over the sent frame: strongest peak vs the true 2D joint of the nearest person: '
+              'median %.1f px, p90 %.1f px, %.0f %% within 20 px (%d view-frames, frame %dx%d)' % (
+                  args.heat_joint, np.median(e), np.percentile(e, 90), 100 * (e < 20).mean(), len(e), w, h))
     if matched_scores or ghosts:
         ms = np.array(matched_scores) if matched_scores else np.zeros(0)
         gs = np.array([g[1] for g in ghosts]) if ghosts else np.zeros(0)

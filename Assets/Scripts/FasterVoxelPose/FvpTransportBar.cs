@@ -120,6 +120,7 @@ public sealed class FvpTransportBar
     public readonly Canvas canvas;
     public readonly int display;
     public readonly FvpHud hud;
+    public readonly FvpHeatPanel heat;
     readonly GameObject root;
     readonly Image strip, track, fill, thumb;
     readonly Image[] bg = new Image[FvpBarLayout.PartCount];
@@ -139,6 +140,7 @@ public sealed class FvpTransportBar
         canvas.pixelPerfect = true;           // snap UI elements and glyphs to whole pixels
 
         hud = new FvpHud(root.transform);
+        heat = new FvpHeatPanel(root.transform);
 
         strip = NewImage("Strip", root.transform, Dim);
         track = NewImage("Track", strip.transform, TrackColor);
