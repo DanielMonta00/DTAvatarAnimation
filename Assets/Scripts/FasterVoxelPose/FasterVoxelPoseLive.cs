@@ -4,10 +4,8 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
-using System.Threading.Tasks;
 using Unity.Collections;
 using UnityEngine;
-using UnityEngine.Experimental.Rendering; // GraphicsFormat
 using UnityEngine.Rendering;
 
 // Live multi-view 3D pose estimation with Faster-VoxelPose (Ye et al., ECCV 2022).
@@ -15,15 +13,15 @@ using UnityEngine.Rendering;
 // Add this to an object (Tools > FasterVoxelPose > Create FasterVoxelPose object does it and wires the scene) and
 // press Play. Each captured set of camera images goes to a Python server (Server~/fvp_server.py, which Unity
 // launches) that runs the unmodified network on the GPU; the fused 3D skeletons come back and are
-//   - drawn over each camera's image in a monitor strip on the Game view (what the network saw + what it found),
+//   - drawn over each camera's own display (the Target Display the CalibratedCamera shows its image on),
 //   - drawn in 3D as gizmos (Scene view, or Game view with Gizmos on),
 //   - published as FvpPerson lists (People, FrameEstimated) for the objects the poses will drive.
 //
-// Transport controls (monitor buttons, or Space / Left / Right / R / Home / End on the Game view) pause the scene,
+// Transport controls (a slim bar on Display 1, or Space / Left / Right / R / Home / End on the Game view) pause the scene,
 // step it one frame at a time and rewind through everything estimated so far. See FasterVoxelPoseLive.Playback.cs.
 //
 // Frames are estimated one at a time, newest first: while the server is busy the cameras are not read, so the
-// estimate always describes the latest scene, a little behind it (the latency shown in the monitor).
+// estimate always describes the latest scene, a little behind it (the latency shown in the status line).
 [DisallowMultipleComponent]
 [DefaultExecutionOrder(800)]
 public partial class FasterVoxelPoseLive : MonoBehaviour
@@ -72,9 +70,8 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
     public string extraServerArgs = "";
 
     [Header("Playback")]
-    [Tooltip("Estimates kept for rewinding (each holds the camera images, as JPEG, and the skeletons).")]
-    [Range(10, 3000)] public int historyFrames = 400;
-    [Range(40, 100)] public int jpegQuality = 80;
+    [Tooltip("Estimates kept for rewinding (skeletons + Animator states; a few kB each).")]
+    [Range(10, 20000)] public int historyFrames = 2000;
     [Tooltip("How far one scene step advances, in seconds (the dataset's frame interval).")]
     public float stepSeconds = 1f / 30f;
     [Tooltip("Pausing also stops the scene (Time.timeScale = 0). Off pauses only the estimator.")]
@@ -85,11 +82,15 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
     [Range(0.1f, 8f)] public float rewindSpeed = 1f;
     public bool enableHotkeys = true;
 
-    [Header("Monitor (Game view)")]
-    public bool showMonitor = true;
-    [Tooltip("Width of one camera tile, pixels (shrinks to fit the Game view).")]
-    [Range(160, 960)] public int tileWidth = 420;
-    public bool showJointNames = false;
+    [Header("Overlay on the camera displays")]
+    [Tooltip("Draw the estimated skeletons over each camera's Target Display.")]
+    public bool showOverlay = true;
+    [Range(1f, 8f)] public float overlayLineWidth = 3f;
+    [Range(3f, 16f)] public float overlayDotSize = 7f;
+    [Tooltip("Person id and score next to each neck.")]
+    public bool overlayTags = true;
+    [Tooltip("Transport bar (pause / step / rewind / slider) on Display 1. M toggles it on the Game view.")]
+    public bool showControls = true;
 
     [Header("Gizmos")]
     public bool drawSkeleton = true;
@@ -127,9 +128,6 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         public RenderTexture small;    // downscaled copy that is read back
         public Camera shadow;          // renders plain / undistorted cameras into shadowRT
         public RenderTexture shadowRT;
-        public Texture2D display;      // raw uploads for the monitor (RGB24, fixed size)
-        public Texture2D decoded;      // JPEG decodes for history frames
-        public Texture shown;          // whichever of the two holds the frame on show
 
         public bool Distorted => calib != null && calib.IsApplied && calib.DistortionActive;
     }
@@ -162,7 +160,6 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
     int cursor;
     bool followHead = true;
     readonly FvpTracker tracker = new FvpTracker();
-    byte[] flipScratch;
 
     float estimateFps;
     float lastResultReal;
@@ -296,6 +293,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         foreach (FvpFrame f in history) f.evicted = true;
         history.Clear();
         DestroySlots();
+        DestroyOverlays();
         // Worker threads may still be sending / encoding: their buffers are simply left to the GC.
         releaseWatch.Clear();
         FvpBufferPool.Clear();
@@ -480,10 +478,8 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
             s.cam.TryGetComponent(out s.calib);
             s.small = new RenderTexture(w, h, 0, RenderTextureFormat.ARGB32) { name = $"FVP view {i}", filterMode = FilterMode.Bilinear };
             s.small.Create();
-            s.display = new Texture2D(w, h, TextureFormat.RGB24, false) { name = $"FVP display {i}", hideFlags = HideFlags.HideAndDontSave, filterMode = FilterMode.Bilinear };
             slots[i] = s;
         }
-        flipScratch = new byte[w * h * 3];
         problem = null;
         return true;
     }
@@ -496,8 +492,6 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
             if (s.shadow != null) Destroy(s.shadow.gameObject);
             if (s.shadowRT != null) { s.shadowRT.Release(); Destroy(s.shadowRT); }
             if (s.small != null) { s.small.Release(); Destroy(s.small); }
-            if (s.display != null) Destroy(s.display);
-            if (s.decoded != null) Destroy(s.decoded);
         }
         slots = null;
     }
@@ -651,7 +645,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
             else
             {
                 byte[] buf = FvpBufferPool.Rent(stride * frameH);
-                // GPU rows run bottom-up; the network and the monitor overlay want top-down.
+                // GPU rows run bottom-up; the network wants top-down.
                 for (int y = 0; y < frameH; y++)
                     NativeArray<byte>.Copy(data, (frameH - 1 - y) * stride, buf, y * stride, stride);
                 f.raw[view] = buf;
@@ -671,8 +665,8 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         }
         failedWarned = false;
 
-        // Send and JPEG-encode in parallel; the buffers go back to the pool when both are done.
-        f.pendingOps = 2;
+        // The buffers go back to the pool once they have been sent (and the frame has been answered).
+        f.pendingOps = 1;
         releaseWatch.Add(f);
         inFlight = f;
 
@@ -684,25 +678,9 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
             f.evicted = true; // link down or queue full: nothing is coming back for this one
             inFlight = null;
         }
-
-        int quality = jpegQuality;
-        Task.Run(() => EncodeJpegs(f, quality));
     }
 
     bool failedWarned;
-
-    static void EncodeJpegs(FvpFrame f, int quality)
-    {
-        try
-        {
-            var jp = new byte[f.raw.Length][];
-            for (int i = 0; i < jp.Length; i++)
-                jp[i] = ImageConversion.EncodeArrayToJPG(f.raw[i], GraphicsFormat.R8G8B8_UNorm, (uint)f.width, (uint)f.height, 0, quality);
-            f.jpeg = jp;
-        }
-        catch (Exception e) { Debug.LogError("[FasterVoxelPose] jpeg: " + e); }
-        finally { Interlocked.Decrement(ref f.pendingOps); }
-    }
 
     void DiscardRaw(FvpFrame f)
     {
@@ -711,19 +689,16 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         f.raw = null;
     }
 
-    // The raw view buffers may only go back to the pool once the sender and the encoder are finished with them, and
-    // (so the live monitor can upload them without decoding the JPEG again) once the frame has been estimated and
-    // shown, or was given up on.
+    // The raw view buffers (what was sent; readable from FrameEstimated) go back to the pool once the sender is done
+    // with them and the frame has been answered or given up on.
     void ReleaseFinishedBuffers()
     {
         for (int i = releaseWatch.Count - 1; i >= 0; i--)
         {
             FvpFrame f = releaseWatch[i];
             if (Volatile.Read(ref f.pendingOps) != 0) continue;
-            if (!f.evicted && !f.estimated) continue;                   // its result is still on the way
-            if (f == displayed && texFrame != f && showMonitor) continue; // the monitor has not uploaded it yet
+            if (!f.evicted && !f.estimated) continue; // its result is still on the way
             DiscardRaw(f);
-            if (f.evicted) f.jpeg = null;
             releaseWatch.RemoveAt(i);
         }
     }
@@ -805,8 +780,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
 
     static void Evict(FvpFrame f)
     {
-        f.evicted = true;
-        f.jpeg = null; // raw (if still pending) is released by ReleaseFinishedBuffers
+        f.evicted = true; // raw (if still pending) is released by ReleaseFinishedBuffers
     }
 
     // ---------------- status ----------------

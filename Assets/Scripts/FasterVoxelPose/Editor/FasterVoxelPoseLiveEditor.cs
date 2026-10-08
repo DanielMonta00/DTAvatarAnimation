@@ -3,7 +3,7 @@ using UnityEditor;
 using UnityEngine;
 
 // Inspector for FasterVoxelPoseLive: setup buttons, and in Play mode the status line plus the same transport
-// controls as the monitor on the Game view (handy when the Scene view has the focus).
+// controls as the bar on the Game view (handy when the Scene view has the focus).
 [CustomEditor(typeof(FasterVoxelPoseLive))]
 public class FasterVoxelPoseLiveEditor : Editor
 {
@@ -17,8 +17,8 @@ public class FasterVoxelPoseLiveEditor : Editor
         else
         {
             EditorGUILayout.HelpBox(
-                "Press Play: the server starts (first time: ~10 s to load the model), the monitor appears on the Game view and the " +
-                "skeletons are drawn as gizmos. The cyan box is the capture volume - people are only found inside it.",
+                "Press Play: the server starts (first time: ~10 s to load the model), the skeletons appear over each camera's display and " +
+                "as gizmos. The cyan box is the capture volume - people are only found inside it.",
                 MessageType.Info);
         }
 

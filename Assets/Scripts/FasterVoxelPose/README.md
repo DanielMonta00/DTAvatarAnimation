@@ -3,8 +3,8 @@
 Runs [Faster-VoxelPose](https://github.com/AlvinYH/Faster-VoxelPose) (Ye et al., ECCV 2022) on the calibrated
 cameras of the scene and shows what it finds, live:
 
-* a **monitor strip** on the Game view: one tile per camera with the image the network saw and the estimated
-  skeletons projected back over it,
+* the **estimated skeletons drawn over each camera's own display** (cam107 / cam103 / cam120 each on the Target
+  Display its `CalibratedCamera` already shows its image on), with a status line per display,
 * the **3D reconstruction as gizmos** (Scene view, or Game view with *Gizmos* on) plus the capture volume box,
 * **pause / frame-by-frame / rewind** controls,
 * the poses as plain C# objects (`FvpPerson`) for whatever they will drive next (Bulles, PontRoulant…).
@@ -26,7 +26,7 @@ requirements) and the Faster-VoxelPose checkout with its two checkpoints — the
 
 ## Controls
 
-On the monitor, or with the **Game view focused**:
+On the slim transport bar at the bottom of Display 1, or with the **Game view focused**:
 
 | Key | Button | Does |
 |---|---|---|
@@ -36,17 +36,20 @@ On the monitor, or with the **Game view focused**:
 | R | `<<` | Rewind continuously (speed: `Rewind Speed`); press again to stop |
 | | `>>` | Replay forward through the history |
 | Home / End | `\|<` `>\|` | Oldest / newest frame |
-| M | Hide | Show / hide the monitor |
+| M | Hide | Show / hide the transport bar |
 | | slider | Scrub anywhere in the history |
 
-A *frame* is one estimate: the camera images, the skeletons, and the state of the tracked Animators. History keeps the
-last `History Frames` (default 400; images are stored as JPEG, ~250 kB per frame).
+A *frame* is one estimate: the skeletons, the camera models that were used and the state of the tracked Animators.
+History keeps the last `History Frames` (default 2000, a few kB each).
 
 **What rewinds.** While you scrub, the *tracked Animators* are put back to the state they had in that frame, so the 3D
-avatar follows the monitor. **Play** then continues from the frame under the cursor (the frames after it are
-dropped). Physics, particle systems and scripts are paused but not rewound, and there is no way to rewind a live
-mocap stream: for those the images and skeletons come from the past while the scene shows the present.
-Animators set to *Unscaled Time* ignore the pause.
+avatar - and therefore the camera image under the overlay - follows the skeleton. **Play** then continues from the
+frame under the cursor (the frames after it are dropped). Physics, particle systems and scripts are paused but not
+rewound, and a live mocap stream cannot be rewound: for those the skeleton comes from the past while the camera
+image shows the present. Animators set to *Unscaled Time* ignore the pause.
+
+The overlay is drawn over the **live** camera image. While live, the skeleton is the newest estimate, i.e. a
+few frames (the latency in the status line) behind the image; paused or rewound they show the same moment.
 
 ## How it works
 
@@ -62,8 +65,11 @@ Unity (FasterVoxelPoseLive)                                  Python (Server~/fvp
   would be a research project of its own. The server runs the repo's code as it is. Measured on the dev RTX 5000 Ada:
   ~65–110 ms per frame with 3–4 views (≈10 estimates/s); Unity keeps rendering while it works.
 * **Newest frame first.** While the server is busy the cameras are not read, so the estimate always describes the
-  latest scene a little late (shown in the monitor). The overlay uses the images *of that estimate*, so image and
-  skeleton always agree.
+  latest scene a little late (shown in the status line).
+* **Overlay.** One screen-space canvas per camera on that camera's Target Display. For a `CalibratedCamera` showing
+  its lens-distorted image it uses the same letterbox as that presenter and projects through the camera model that
+  was sent to the server (K, pose, lens distortion), so a joint lands on the pixel where the presenter draws it.
+  Other cameras get a full-screen overlay projected with the camera's own viewport.
 * **Calibration.** Each view's K and lens distortion (`CalibratedCamera`), position and orientation go to the server,
   which projects its voxels with the *same* lens model, so the heatmaps are sampled where the distorted image really
   has the person. Voxels behind a camera or past the radius where the lens polynomial stops being valid are masked
@@ -102,7 +108,8 @@ fvp.FrameEstimated += frame =>              // every new estimate, main thread
 
 | | |
 |---|---|
-| `FasterVoxelPoseLive*.cs` | the component (core + capture, playback, monitor, gizmos) |
+| `FasterVoxelPoseLive*.cs` | the component (core + capture, playback, overlay + transport bar, gizmos) |
+| `FvpOverlay.cs`, `FvpOverlayGraphic.cs` | the per-display overlay canvas and its skeleton mesh |
 | `FvpClient.cs`, `FvpProtocol.cs` | socket link and wire format (shared with the server) |
 | `FvpCameraModel.cs` | camera model + the projection behind the overlay (UnityEngine-free) |
 | `FvpHistory.cs`, `FvpSkeleton.cs` | frames / people / tracker, joint data |
@@ -119,10 +126,12 @@ fvp.FrameEstimated += frame =>              // every new estimate, main thread
 * **No people** – raise the volume to cover where they stand, lower *Min Score*, and check the gizmo box: the
   network only sees people whose feet-to-nose range lies inside it vertically (default floor − 0.2 m … 1.8 m).
   Synthetic avatars score lower (0.1–0.3) than the real footage the network was trained on.
-* **Skeletons offset from the avatar in the tiles** – the camera calibration, not the network: the overlay uses the
+* **Skeletons offset from the avatar on the displays** – the camera calibration, not the network: the overlay uses the
   exact camera model that was sent. cam103 / cam120 currently use *placeholder* extrinsics (fabricated from where the
   cameras were dragged to), so expect errors until they are really calibrated.
-* **Monitor invisible** – IMGUI draws on the main display only; set the Game view to *Display 1*.
+* **No overlay on a display** – the overlay is a screen-space canvas on the camera's *Target Display*; make sure the
+  Game view shows that display (Display 1 / 2 / 3) and that *Show Overlay* is on. The transport bar is IMGUI, which
+  only exists on Display 1.
 * **Estimates/s is low** – the GPU is shared with Unity's rendering of three 1080p lens-distorted cameras; lower
   `Frame Width` or the cameras' resolution.
 * **A lens-distorted camera view is black** (typically right after a Library rebuild) – `LensDistortionRenderer` sets

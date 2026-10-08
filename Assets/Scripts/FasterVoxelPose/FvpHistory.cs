@@ -66,11 +66,10 @@ public sealed class FvpFrame
     public FvpCameraModel[] cameras;
     public FvpAnimState[] anims;
 
-    // Per view, top-left origin RGB24 straight from the GPU readback (pooled). Released once the frame has
-    // been sent and encoded; history then keeps only the JPEGs.
+    // Per view, top-left origin RGB24 straight from the GPU readback (pooled): exactly what was sent to the network.
+    // Valid until the frame has been answered, so read it from FrameEstimated if you need the images.
     public byte[][] raw;
-    public byte[][] jpeg;
-    public int pendingOps;         // sending + encoding; touched from worker threads via Interlocked
+    public int pendingOps;         // 1 while the sender thread still holds the buffers; touched via Interlocked
 
     public float[] poses;          // [maxPeople, 15, 5]: x, y, z (mm, model frame), valid, score
     public readonly List<FvpPerson> people = new List<FvpPerson>();

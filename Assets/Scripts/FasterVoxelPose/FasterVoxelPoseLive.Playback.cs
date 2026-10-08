@@ -11,7 +11,7 @@ using UnityEngine;
 //   Step >       at the newest frame: lets the scene advance by stepSeconds and estimates it; further back: walks
 //                forward through the history.
 //   Step <       walks back through the history. The tracked Animators are put back to that frame as it goes, so
-//                the 3D scene follows the monitor.
+//                the 3D scene follows the cursor.
 //   Rewind <<    keeps stepping back at the recorded speed (rewindSpeed x); Replay >> does the same forwards.
 //   Play         resumes. After a rewind the scene continues from the frame under the cursor (the frames after
 //                it are dropped), provided Animators are tracked; otherwise it continues from the newest frame.

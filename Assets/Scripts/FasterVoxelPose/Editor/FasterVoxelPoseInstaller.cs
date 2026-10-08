@@ -52,7 +52,7 @@ public static class FasterVoxelPoseInstaller
                   $"  cameras: {(fvp.cameras.Count == 0 ? "NONE FOUND - assign them in the Inspector" : string.Join(", ", fvp.cameras.Select(Describe)))}\n" +
                   $"  volume anchor: {(fvp.volumeAnchor != null ? fvp.volumeAnchor.name : "none (world origin)")}, box {fvp.volumeSize} m at +{fvp.volumeOffset}\n" +
                   $"  animators put back on rewind: {(fvp.trackedAnimators.Count == 0 ? "none" : string.Join(", ", fvp.trackedAnimators.Select(a => a.name)))}\n" +
-                  "  Press Play. The first run loads the model (~10 s); the monitor appears on the Game view.", go);
+                  "  Press Play. The first run loads the model (~10 s); the skeletons appear over each camera's display.", go);
     }
 
     static string Describe(Camera c) => c == null ? "(missing)" : $"{c.name.Trim()} [{HierarchyPath(c.transform)}]";
