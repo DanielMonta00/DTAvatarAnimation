@@ -62,6 +62,7 @@ public partial class FasterVoxelPoseLive
     public void Pause()
     {
         if (paused) return;
+        EnsureSceneState(); // the video players have to be known before they can be paused
         paused = true;
         autoDir = 0;
         pausedAtReal = Time.realtimeSinceStartup;
@@ -69,6 +70,7 @@ public partial class FasterVoxelPoseLive
         {
             if (!timeScaleHeld) { userTimeScale = Time.timeScale > 0f ? Time.timeScale : 1f; timeScaleHeld = true; }
             Time.timeScale = 0f;
+            sceneState.PauseMedia(); // video does not follow timeScale
         }
         wantOneShot = IsReady;
     }
@@ -89,7 +91,7 @@ public partial class FasterVoxelPoseLive
             {
                 RestoreScene(history[cursor]);
                 TruncateAfter(cursor);
-                tracker.Reset(history[cursor].people);
+                tracker.Reset(history[cursor].people, history[cursor].sceneTime);
             }
             else
             {
@@ -101,6 +103,7 @@ public partial class FasterVoxelPoseLive
         paused = false;
         wantOneShot = false;
         if (timeScaleHeld) { Time.timeScale = userTimeScale; timeScaleHeld = false; }
+        sceneState.ResumeMedia();
     }
 
     public void StepForward()
@@ -184,9 +187,12 @@ public partial class FasterVoxelPoseLive
 
     void Show(FvpFrame f) { displayed = f; }
 
-    static void RestoreScene(FvpFrame f)
+    // The whole scene as it was in that frame: everything that moves on its own, then the Animators.
+    void RestoreScene(FvpFrame f)
     {
-        if (f == null || f.anims == null) return;
+        if (f == null) return;
+        sceneState.Restore(f.scene);
+        if (f.anims == null) return;
         foreach (FvpAnimState s in f.anims) s.Restore();
     }
 
@@ -254,6 +260,7 @@ public partial class FasterVoxelPoseLive
         // One frame at exactly stepSeconds, whatever timeScale the scene normally runs at.
         Time.captureDeltaTime = Mathf.Max(1e-4f, stepSeconds);
         Time.timeScale = 1f;
+        sceneState.AdvanceMedia(stepSeconds);
         stepStartTime = Time.timeAsDouble;
         stepArmedFrame = Time.frameCount;
         stepState = StepState.Armed;
@@ -273,6 +280,7 @@ public partial class FasterVoxelPoseLive
     // Leave the scene's clock as we found it.
     void ReleaseTransportState()
     {
+        sceneState.ResumeMedia();
         if (timeScaleHeld) { Time.timeScale = userTimeScale; timeScaleHeld = false; }
         Time.captureDeltaTime = 0f;
         paused = false; autoDir = 0; stepQueue = 0; stepState = StepState.Idle; wantOneShot = false; deferred = null;

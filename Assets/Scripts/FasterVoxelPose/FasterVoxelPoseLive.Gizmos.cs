@@ -4,7 +4,8 @@ using UnityEditor;
 #endif
 
 // 3D view of the estimate: the skeletons of the frame on show (live, or the history frame under the cursor) and the
-// capture volume the network searches. Gizmos draw in the Scene view, and in the Game view with its Gizmos toggle on.
+// capture volume the network searches. Same colours as the displays: the estimate in orange, the avatar's ground truth in
+// green (lighter = left, darker = right). Gizmos draw in the Scene view, and in the Game view with its Gizmos toggle on.
 public partial class FasterVoxelPoseLive
 {
     void OnDrawGizmos()
@@ -12,26 +13,46 @@ public partial class FasterVoxelPoseLive
         if (drawCaptureVolume) DrawVolume();
         if (!Application.isPlaying || !drawSkeleton || displayed == null) return;
 
+        if (showGroundTruth)
+            foreach (FvpPerson p in displayed.groundTruth) DrawGizmoSkeleton(p, true);
+
+        if (!showEstimate) return;
         foreach (FvpPerson p in displayed.people)
         {
-            Gizmos.color = p.Color;
-            for (int e = 0; e < FvpSkeleton.Edges.GetLength(0); e++)
-                Gizmos.DrawLine(p.joints[FvpSkeleton.Edges[e, 0]], p.joints[FvpSkeleton.Edges[e, 1]]);
-            for (int j = 0; j < FvpSkeleton.Count; j++)
-                Gizmos.DrawSphere(p.joints[j], j == FvpSkeleton.MidHip ? jointRadius * 1.6f : jointRadius);
+            DrawGizmoSkeleton(p, false);
 
             // Where the person stands, straight down from the root.
             Vector3 root = p.Root;
+            Gizmos.color = FvpSkeleton.EstimateColor(FvpSkeleton.MidHip);
             Gizmos.DrawLine(root, new Vector3(root.x, VolumeFloorY(), root.z));
             Gizmos.DrawWireSphere(new Vector3(root.x, VolumeFloorY(), root.z), 0.12f);
 
 #if UNITY_EDITOR
             if (drawLabels)
             {
-                var style = new GUIStyle(EditorStyles.boldLabel) { normal = { textColor = p.Color } };
+                var style = new GUIStyle(EditorStyles.boldLabel) { normal = { textColor = FvpSkeleton.EstimateColor(FvpSkeleton.MidHip) } };
                 Handles.Label(p.joints[FvpSkeleton.Nose] + Vector3.up * 0.18f, $"#{p.id}  {p.score:F2}", style);
             }
 #endif
+        }
+    }
+
+    void DrawGizmoSkeleton(FvpPerson p, bool isGroundTruth)
+    {
+        Color Col(int j) => isGroundTruth ? FvpSkeleton.GroundTruthColor(j) : FvpSkeleton.EstimateColor(j);
+        for (int e = 0; e < FvpSkeleton.Edges.GetLength(0); e++)
+        {
+            int a = FvpSkeleton.Edges[e, 0], b = FvpSkeleton.Edges[e, 1];
+            if (!p.IsValid(a) || !p.IsValid(b)) continue;
+            Gizmos.color = Color.Lerp(Col(a), Col(b), 0.5f);
+            Gizmos.DrawLine(p.joints[a], p.joints[b]);
+        }
+        float radius = isGroundTruth ? jointRadius * 0.7f : jointRadius;
+        for (int j = 0; j < FvpSkeleton.Count; j++)
+        {
+            if (!p.IsValid(j)) continue;
+            Gizmos.color = Col(j);
+            Gizmos.DrawSphere(p.joints[j], j == FvpSkeleton.MidHip ? radius * 1.6f : radius);
         }
     }
 

@@ -122,11 +122,18 @@ class Engine:
         self.backbone = self.backbone.to(self.device).eval()
         self.head_state = torch.load(self.model_file, map_location='cpu')
 
+        if args.fp16 and self.device.type == 'cuda':
+            self._backbone_fp16()
         if not args.no_mask:
             self._install_masked_projection()
+        if args.cudnn != 'config':
+            torch.backends.cudnn.benchmark = (args.cudnn == 'on')
+        log('[fvp] cudnn autotune %s' % ('on' if torch.backends.cudnn.benchmark else 'off'))
 
         self.model = None
         self.config_id = None
+        self.config_sig = None       # what the current head was built for (see same_config)
+        self.stats = []              # (pre ms, net ms, total ms) of the last frames, logged every STATS_EVERY
         self.cameras = None
         self.resize_transform = None
         self.trans_np = None
@@ -135,6 +142,20 @@ class Engine:
         self.mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(1, 3, 1, 1)
         self.std = torch.tensor([0.229, 0.224, 0.225], device=self.device).view(1, 3, 1, 1)
         self.gpu_name = torch.cuda.get_device_name(self.device) if self.device.type == 'cuda' else 'cpu'
+
+    # The ResNet-50 backbone is about half of the per-frame time. Running it in half precision (heatmaps cast back to
+    # float32 for everything after it) takes ~15 ms off a frame; on the recorded session the joints move by < 1 mm on
+    # average.
+    def _backbone_fp16(self):
+        torch = self.torch
+        backbone, forward = self.backbone, self.backbone.forward
+
+        def forward_fp16(x):
+            with torch.autocast('cuda', dtype=torch.float16):
+                return forward(x).float()
+
+        backbone.forward = forward_fp16
+        log('[fvp] backbone in float16')
 
     # The repo projects voxel centres with the raw lens polynomial and no visibility test. In a lab
     # with cameras on every side that is wrong in two ways: voxels BEHIND a camera divide by a
@@ -163,10 +184,104 @@ class Engine:
         project_whole.project_pose = project_pose_masked
         project_individual.project_pose = project_pose_masked
 
+    # What a config message boils down to, to tell whether the head and its voxel grids are still valid for it.
+    @staticmethod
+    def _signature(msg):
+        cams = []
+        for c in msg['cameras']:
+            cams.append(np.concatenate([
+                np.asarray(c['R'], float).ravel(), np.asarray(c['T'], float).ravel(),
+                [c['fx'], c['fy'], c['cx'], c['cy']],
+                np.asarray(c.get('k', [0, 0, 0]), float).ravel(), np.asarray(c.get('p', [0, 0]), float).ravel(),
+                [float(c.get('max_radius') or 0.0)]]))
+        return {'w': int(msg['width']), 'h': int(msg['height']), 'people': int(msg.get('max_people', 10)),
+                'vox': np.asarray(msg.get('voxels_per_axis', [80, 80, 20]), int),
+                'centre': np.asarray(msg['space_center'], float), 'size': np.asarray(msg['space_size'], float),
+                'cams': np.stack(cams) if cams else np.zeros((0, 0))}
+
+    # Per-entry tolerances of one camera vector: R(9) T(3, mm) f/c(4, px) k(3) p(2) radius
+    _CAM_TOL = np.array([1e-6] * 9 + [0.01] * 3 + [0.01] * 4 + [1e-8] * 3 + [1e-8] * 2 + [1e-4])
+
+    @classmethod
+    def _same_signature(cls, a, b):
+        if a is None or b is None:
+            return False
+        if (a['w'], a['h'], a['people']) != (b['w'], b['h'], b['people']) or not np.array_equal(a['vox'], b['vox']):
+            return False
+        if np.abs(a['centre'] - b['centre']).max() > 0.5 or np.abs(a['size'] - b['size']).max() > 0.5:
+            return False
+        if a['cams'].shape != b['cams'].shape or a['cams'].shape[1] != len(cls._CAM_TOL):
+            return False
+        return bool((np.abs(a['cams'] - b['cams']) <= cls._CAM_TOL).all())
+
+    # The same cameras, volume and frame size as the head in memory was built for: its voxel grids are still right.
+    def same_config(self, msg):
+        return self.model is not None and self._same_signature(self.config_sig, self._signature(msg))
+
+    # Where the last config is kept, so a fresh server can have its grids and kernels ready before anybody asks.
+    def _cache_file(self):
+        d = self.args.cache_dir
+        return os.path.join(d, 'last_config.json') if d else None
+
+    def _save_config(self, msg):
+        path = self._cache_file()
+        if not path:
+            return
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as fh:
+                json.dump({k: v for k, v in msg.items() if k != 'type'}, fh)
+        except OSError as e:
+            log('[fvp] could not save the config cache: %s' % e)
+
+    # Builds the head, the voxel grids and warms the kernels for the last config seen, before the first client connects.
+    def prewarm(self):
+        path = self._cache_file()
+        if not path or not os.path.isfile(path):
+            log('[fvp] no cached config yet: the first Play builds the grids once')
+            return
+        try:
+            with open(path, encoding='utf-8') as fh:
+                msg = json.load(fh)
+            msg['type'] = 'config'
+            msg['config_id'] = 0
+            ms, _ = self.configure(msg)
+            log('[fvp] grids and kernels ready from the cached config: %d views %dx%d  (%.0f ms)' % (
+                self.view_count, self.frame_size[0], self.frame_size[1], ms))
+        except Exception as e:  # a stale or damaged cache must never keep the server from starting
+            traceback.print_exc()
+            log('[fvp] cached config ignored: %s' % e)
+            self.model = None
+            self.config_sig = None
+
+    # The 3D networks run once per detected person, as one batch: cudnn tunes (and the allocator sizes) every new batch
+    # size on first use, which is a stall of up to seconds the first time somebody steps into view. Do them now, for 1..k.
+    def _warm_people(self, heatmaps, centers, k_max):
+        torch = self.torch
+        pc0 = centers.detach().clone()
+        centre = torch.as_tensor(np.asarray(self.config.CAPTURE_SPEC.SPACE_CENTER, dtype=np.float32), device=self.device)
+        with torch.no_grad():
+            for k in range(1, min(k_max, pc0.shape[1]) + 1):
+                pc = pc0.clone()
+                pc[:, :, 3] = -1.0
+                pc[:, :k, 0:3] = centre
+                pc[:, :k, 3] = 0.0
+                pc[:, :k, 4] = 0.5
+                pc[:, :k, 5:7] = 0.5
+                mask = pc[:, :, 3] >= 0
+                self.model.joint_net({'seq': [SEQ]}, heatmaps, pc, mask, self.cameras, self.resize_transform)
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize()
+
     # (Re)builds everything that depends on the cameras / capture volume / frame size. The head's
     # constructor bakes the voxel grids in, so a new volume needs a new head; the backbone is kept.
+    # Returns (milliseconds, reused): `reused` when nothing changed since the last config and the grids were kept.
     def configure(self, msg):
         torch, config = self.torch, self.config
+        if self.same_config(msg):
+            self.config_id = msg.get('config_id')
+            config.CAPTURE_SPEC.MIN_SCORE = float(msg.get('min_score', 0.1))
+            return 0.0, True
         cams = msg['cameras']
         w, h = int(msg['width']), int(msg['height'])
         config.DATASET.CAMERA_NUM = len(cams)
@@ -211,7 +326,30 @@ class Engine:
         # so the first real frame is not the slow one.
         blank = np.zeros((self.view_count, h, w, 3), np.uint8)
         self.infer(blank, float(config.CAPTURE_SPEC.MIN_SCORE))
-        return (time.perf_counter() - t0) * 1000.0
+        if self.args.warm_people > 0:
+            try:
+                inputs = self._preprocess(blank)
+                with torch.no_grad():
+                    _, _, centers, heat, _ = self.model(backbone=self.backbone, views=inputs, meta={'seq': [SEQ]},
+                                                        cameras=self.cameras, resize_transform=self.resize_transform)
+                self._warm_people(heat, centers, self.args.warm_people)
+            except Exception as e:  # warming is an optimisation; never fail a config over it
+                traceback.print_exc()
+                log('[fvp] could not pre-tune for several people: %s' % e)
+        self.config_sig = self._signature(msg)
+        self._save_config(msg)
+        return (time.perf_counter() - t0) * 1000.0, False
+
+    STATS_EVERY = 100
+
+    # One line every STATS_EVERY frames: what the server spends per frame (tells GPU contention apart from slow code).
+    def record(self, pre, net, total):
+        self.stats.append((pre, net, total))
+        if len(self.stats) >= self.STATS_EVERY:
+            a = np.array(self.stats)
+            log('[fvp] last %d frames: pre %.1f ms, net %.1f ms (max %.0f), total %.1f ms (p95 %.0f)' % (
+                len(a), a[:, 0].mean(), a[:, 1].mean(), a[:, 1].max(), a[:, 2].mean(), np.percentile(a[:, 2], 95)))
+            self.stats = []
 
     def _preprocess(self, views):
         cv2, torch = self.cv2, self.torch
@@ -236,11 +374,11 @@ class Engine:
         if self.device.type == 'cuda':
             torch.cuda.synchronize()
         t1 = time.perf_counter()
-        with torch.no_grad():
+        with torch.no_grad(), torch.autocast('cuda', dtype=torch.float16, enabled=self.args.fp16_head and self.device.type == 'cuda'):
             fused, _, centers, _, _ = self.model(
                 backbone=self.backbone, views=inputs, meta={'seq': [SEQ]},
                 cameras=self.cameras, resize_transform=self.resize_transform)
-            poses = fused[0].detach().cpu().numpy().astype('<f4')
+            poses = fused[0].detach().float().cpu().numpy().astype('<f4')
         t2 = time.perf_counter()
         self.last_timing = ((t1 - t0) * 1000.0, (t2 - t1) * 1000.0)
         return poses
@@ -259,12 +397,12 @@ def handle_client(conn, engine, args):
         kind = msg.get('type')
         try:
             if kind == 'config':
-                ms = engine.configure(msg)
-                log('[fvp] config %s: %d views %dx%d, volume centre %s size %s  (%.0f ms)' % (
+                ms, reused = engine.configure(msg)
+                log('[fvp] config %s: %d views %dx%d, volume centre %s size %s  (%.0f ms%s)' % (
                     msg.get('config_id'), engine.view_count, engine.frame_size[0], engine.frame_size[1],
                     np.round(engine.config.CAPTURE_SPEC.SPACE_CENTER).tolist(),
-                    engine.config.CAPTURE_SPEC.SPACE_SIZE.tolist(), ms))
-                send_packet(conn, {'type': 'config_ok', 'config_id': msg.get('config_id'), 'ms': ms})
+                    engine.config.CAPTURE_SPEC.SPACE_SIZE.tolist(), ms, ', grids reused' if reused else ''))
+                send_packet(conn, {'type': 'config_ok', 'config_id': msg.get('config_id'), 'ms': ms, 'reused': reused})
             elif kind == 'frame':
                 if engine.model is None or msg.get('config_id') != engine.config_id:
                     send_packet(conn, {'type': 'error', 'id': msg.get('id'), 'code': 'no_config',
@@ -282,6 +420,7 @@ def handle_client(conn, engine, args):
                 t0 = time.perf_counter()
                 poses = engine.infer(views, float(msg.get('min_score', 0.1)))
                 total = (time.perf_counter() - t0) * 1000.0
+                engine.record(engine.last_timing[0], engine.last_timing[1], total)
                 send_packet(conn, {'type': 'result', 'id': msg.get('id'), 'config_id': engine.config_id,
                                    'people': int(poses.shape[0]), 'joints': int(poses.shape[1]),
                                    't_pre': engine.last_timing[0], 't_net': engine.last_timing[1],
@@ -341,6 +480,13 @@ def main():
     ap.add_argument('--model', help='head checkpoint (default: <repo>/output/panoptic/jln64/model_best.pth.tar)')
     ap.add_argument('--preprocess', choices=['warp', 'stretch'], default='warp',
                     help='warp: aspect-preserving affine like the training data; stretch: plain resize like the notebooks')
+    ap.add_argument('--fp16', action='store_true', help='run the 2D backbone in half precision (~15 ms faster per frame)')
+    ap.add_argument('--fp16-head', action='store_true', help='also run the 3D networks (root + joint) in half precision')
+    ap.add_argument('--cudnn', choices=['config', 'on', 'off'], default='config',
+                    help="cudnn autotuning: 'config' follows the repo's yaml (on); 'off' skips the per-shape tuning stalls")
+    ap.add_argument('--warm-people', type=int, default=3,
+                    help='pre-tune the per-person 3D networks for 1..N people when a config is built (0 = skip)')
+    ap.add_argument('--cache-dir', help='keeps the last config here; the next server start builds its grids from it before any client asks')
     ap.add_argument('--no-mask', action='store_true',
                     help='project voxels exactly like the original repo (no behind-camera / lens-validity mask)')
     ap.add_argument('--idle-exit', type=int, default=900,
@@ -361,6 +507,10 @@ def main():
     t0 = time.time()
     engine = Engine(args)
     log('[fvp] models loaded in %.1f s' % (time.time() - t0))
+    t1 = time.time()
+    engine.prewarm()
+    if engine.model is not None:
+        log('[fvp] warm in %.1f s' % (time.time() - t1))
     serve(engine, args)
 
 

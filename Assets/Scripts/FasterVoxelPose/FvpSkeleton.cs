@@ -21,6 +21,17 @@ public static class FvpSkeleton
         { 2, 6 }, { 2, 12 }, { 6, 7 }, { 7, 8 }, { 12, 13 }, { 13, 14 },
     };
 
+    public static bool IsLeft(int joint) => joint >= LShoulder && joint <= LAnkle;
+    public static bool IsRight(int joint) => joint >= RShoulder && joint <= RAnkle;
+
+    // The comparison overlay. Ground truth is green and the estimate orange; within each, lighter is the person's left
+    // side, darker the right side, and the centre line (neck, nose, mid-hip) sits in between.
+    public static Color GroundTruthColor(int joint) =>
+        IsLeft(joint) ? new Color(0.62f, 1.00f, 0.62f) : IsRight(joint) ? new Color(0.04f, 0.58f, 0.16f) : new Color(0.20f, 0.85f, 0.28f);
+
+    public static Color EstimateColor(int joint) =>
+        IsLeft(joint) ? new Color(1.00f, 0.80f, 0.42f) : IsRight(joint) ? new Color(0.82f, 0.36f, 0.00f) : new Color(1.00f, 0.55f, 0.05f);
+
     // One colour per tracked person; a person keeps theirs for as long as their id lives.
     static readonly Color[] Palette =
     {

@@ -17,7 +17,7 @@ using UnityEngine.Rendering;
 //   - drawn in 3D as gizmos (Scene view, or Game view with Gizmos on),
 //   - published as FvpPerson lists (People, FrameEstimated) for the objects the poses will drive.
 //
-// Transport controls (a slim bar on Display 1, or Space / Left / Right / R / Home / End on the Game view) pause the scene,
+// Transport controls (a slim bar at the bottom of every display, the mouse, or Space / Left / Right / R / Home / End on the Game view) pause the scene,
 // step it one frame at a time and rewind through everything estimated so far. See FasterVoxelPoseLive.Playback.cs.
 //
 // Frames are estimated one at a time, newest first: while the server is busy the cameras are not read, so the
@@ -46,6 +46,10 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
     [Min(320)] public int frameWidth = 960;
     [Tooltip("Cap on estimates per second while live. 0 = as fast as the server answers.")]
     [Min(0f)] public float maxFps = 0f;
+    [Tooltip("Read the camera images back as soon as they are rendered instead of letting the GPU readback arrive 2-3 rendered frames later. Cuts the latency of every estimate (more the heavier the scene) at the cost of a short stall of the main thread each time a frame is captured.")]
+    public bool lowLatencyReadback = true;
+    [Tooltip("Run the 2D ResNet in half precision on the server: ~15 ms faster per frame, same accuracy on the recorded session (147.5 mm vs 147.5 mm MPJPE).")]
+    public bool fastBackbone = true;
     [Tooltip("Most people the network reports per frame.")]
     [Range(1, 10)] public int maxPeople = 10;
     [Tooltip("A person keeps their colour / id when their root moves less than this between two estimates.")]
@@ -69,6 +73,9 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
     [Tooltip("Extra arguments for fvp_server.py, e.g. '--preprocess stretch --no-mask' to reproduce the experiment notebook exactly.")]
     public string extraServerArgs = "";
 
+    // Everything after the fixed arguments of the server command line.
+    public string ServerArguments => ((fastBackbone ? "--fp16 " : "") + extraServerArgs).Trim();
+
     [Header("Playback")]
     [Tooltip("Estimates kept for rewinding (skeletons + Animator states; a few kB each).")]
     [Range(10, 20000)] public int historyFrames = 2000;
@@ -80,17 +87,54 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
     public List<Animator> trackedAnimators = new List<Animator>();
     [Tooltip("Speed of the rewind / replay buttons relative to the recorded scene time.")]
     [Range(0.1f, 8f)] public float rewindSpeed = 1f;
+    [Tooltip("Space pause / play, Left / Right step (hold to repeat), R rewind, Home / End, M the transport bar. Needs the Game view focused.")]
     public bool enableHotkeys = true;
 
+    public enum OverlayImage
+    {
+        // Each display keeps showing the live camera at full frame rate. The ground truth is read from the rig right now and
+        // the estimate is moved forward by its root velocity x latency. (0: what a component saved before this existed gets.)
+        RealTime = 0,
+        // Each display shows the exact frame the estimate was made from: image, ground truth and estimate are the same instant,
+        // at the price of a picture as old as the pipeline latency, updating at the estimate rate.
+        SyncedFrame = 1,
+    }
+
+    [Header("Rewind: the rest of the scene")]
+    [Tooltip("Any transform that moves (robots, conveyors, props, rigidbodies) is found by itself and put back with the Animators. Costs one pass over the scene's transforms per estimate.")]
+    public bool rewindMovingObjects = true;
+    [Tooltip("Also Rigidbody velocities and ArticulationBody joint positions / velocities.")]
+    public bool rewindPhysics = true;
+    [Tooltip("VideoPlayers are paused, stepped and seeked with the scene (they run on unscaled time and would otherwise play on).")]
+    public bool rewindVideo = true;
+    [Tooltip("Scripts whose private runtime state (their own clocks, e.g. CableRobotTrajectory.playTime) goes back with the scene. Auto-wired: CableRobotTrajectory, CableRobot, RandomWalker. Anything computed from Time.time instead of its own state cannot be rewound.")]
+    public List<MonoBehaviour> rewindScripts = new List<MonoBehaviour>();
+
     [Header("Overlay on the camera displays")]
-    [Tooltip("Draw the estimated skeletons over each camera's Target Display.")]
+    [Tooltip("Draw skeletons over each camera's Target Display, in the style of the dataset images.")]
     public bool showOverlay = true;
-    [Range(1f, 8f)] public float overlayLineWidth = 3f;
-    [Range(3f, 16f)] public float overlayDotSize = 7f;
-    [Tooltip("Person id and score next to each neck.")]
-    public bool overlayTags = true;
-    [Tooltip("Transport bar (pause / step / rewind / slider) on Display 1. M toggles it on the Game view.")]
+    [Tooltip("RealTime: the live camera at full frame rate; the ground truth is read from the rig right now and the estimate is moved forward by its root velocity x latency, so limbs still trail a little. SyncedFrame: each display shows the exact frame the estimate was made from, so image, ground truth and estimate always agree, but the picture is as old as the pipeline latency (shown on the display). Paused, both show the frame under the cursor.")]
+    public OverlayImage overlayImage = OverlayImage.RealTime;
+    [Tooltip("RealTime only: shift the estimate by its root velocity x latency so it lands on the live avatar.")]
+    public bool latencyCompensation = true;
+    [Tooltip("Ground truth: the avatars' rigs read out as the same 15 joints (green; lighter = left, darker = right).")]
+    public bool showGroundTruth = true;
+    [Tooltip("Faster-VoxelPose estimate (orange; lighter = left, darker = right).")]
+    public bool showEstimate = true;
+    [Tooltip("Avatars whose rigs give the ground truth. Auto-wired from the MultiViewRecorder that records these cameras.")]
+    public List<Animator> groundTruthAvatars = new List<Animator>();
+    [Tooltip("Line width in pixels of a 1920 px wide image (the dataset images use 2); scales with the display.")]
+    [Range(1f, 8f)] public float overlayLineWidth = 2f;
+    [Tooltip("Dot radius in pixels of a 1920 px wide image (the dataset images use 4).")]
+    [Range(1f, 12f)] public float overlayDotRadius = 4f;
+    [Tooltip("Person id and score next to each estimated neck.")]
+    public bool overlayTags = false;
+    [Tooltip("Transport bar (pause / step / rewind / slider) at the bottom of every display. M toggles it.")]
     public bool showControls = true;
+    [Tooltip("Mouse on any display: left click = pause / play, wheel = step one frame (down = forward), left drag = scrub through the history. Needs the Game view focused.")]
+    public bool enableMouse = true;
+    [Tooltip("Mouse drag distance for one frame of history.")]
+    [Range(2f, 60f)] public float dragPixelsPerFrame = 12f;
 
     [Header("Gizmos")]
     public bool drawSkeleton = true;
@@ -128,6 +172,8 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         public RenderTexture small;    // downscaled copy that is read back
         public Camera shadow;          // renders plain / undistorted cameras into shadowRT
         public RenderTexture shadowRT;
+        public readonly RenderTexture[] frozen = new RenderTexture[2]; // full-resolution copies of the frames in flight / on show
+        public readonly int[] frozenSerial = new int[2];
 
         public bool Distorted => calib != null && calib.IsApplied && calib.DistortionActive;
     }
@@ -160,6 +206,10 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
     int cursor;
     bool followHead = true;
     readonly FvpTracker tracker = new FvpTracker();
+    readonly FvpGroundTruth groundTruth = new FvpGroundTruth();
+    FvpSceneState sceneState = new FvpSceneState();
+    readonly List<FvpPerson> liveGroundTruth = new List<FvpPerson>();
+    int frozenToggle;
 
     float estimateFps;
     float lastResultReal;
@@ -210,6 +260,37 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         trackedAnimators.Clear();
         foreach (Animator a in FindObjectsByType<Animator>(FindObjectsInactive.Exclude, FindObjectsSortMode.None))
             if (a.runtimeAnimatorController != null) trackedAnimators.Add(a);
+
+        FindGroundTruthAvatars();
+        FindRewindScripts();
+    }
+
+    static readonly string[] RewindScriptNames = { "CableRobotTrajectory", "CableRobot", "RandomWalker" };
+
+    // The scripts that run something from a clock of their own (see FvpSceneState).
+    void FindRewindScripts()
+    {
+        rewindScripts.Clear();
+        foreach (MonoBehaviour m in FindObjectsByType<MonoBehaviour>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+            if (m != null && System.Array.IndexOf(RewindScriptNames, m.GetType().Name) >= 0) rewindScripts.Add(m);
+    }
+
+    // Ground truth: the avatars of the MultiViewRecorder that records these cameras (the same ones its dataset
+    // keypoints come from); failing that, the humanoid Animators of the scene.
+    void FindGroundTruthAvatars()
+    {
+        groundTruthAvatars.Clear();
+        MultiViewRecorder recorder = null; int bestShared = 0;
+        foreach (MultiViewRecorder rec in FindObjectsByType<MultiViewRecorder>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            int shared = 0;
+            foreach (Camera c in rec.cameras) if (c != null && cameras.Contains(c)) shared++;
+            if (shared > bestShared) { recorder = rec; bestShared = shared; }
+        }
+        if (recorder != null)
+            foreach (Animator a in recorder.avatars) if (a != null) groundTruthAvatars.Add(a);
+        if (groundTruthAvatars.Count == 0)
+            foreach (Animator a in trackedAnimators) if (a != null && a.isHuman) groundTruthAvatars.Add(a);
     }
 
     static string PathOf(Transform t)
@@ -257,7 +338,18 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         serverLaunched = false; serverError = null;
         paused = false; autoDir = 0; stepQueue = 0; stepState = StepState.Idle; wantOneShot = false;
         tracker.gateMetres = trackGateMetres;
-        tracker.Reset(null);
+        tracker.Reset(null, 0);
+
+        sceneState = new FvpSceneState();
+        if (rewindScripts == null || rewindScripts.Count == 0) FindRewindScripts();
+
+        // A component made before the ground-truth list existed has it empty: find the avatars now.
+        if (showGroundTruth && (groundTruthAvatars == null || groundTruthAvatars.Count == 0))
+        {
+            FindGroundTruthAvatars();
+            if (groundTruthAvatars.Count > 0)
+                Debug.Log($"[FasterVoxelPose] ground-truth avatars (green): {string.Join(", ", groundTruthAvatars.ConvertAll(a => a.name))}", this);
+        }
 
         enabledAt = Time.realtimeSinceStartup;
         prevRunInBackground = Application.runInBackground;
@@ -294,6 +386,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         history.Clear();
         DestroySlots();
         DestroyOverlays();
+        DestroyBars();
         // Worker threads may still be sending / encoding: their buffers are simply left to the GC.
         releaseWatch.Clear();
         FvpBufferPool.Clear();
@@ -321,6 +414,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
             DropInFlight();
         }
         if (client != null && linkUp) UpdateConfig();
+        PollInput();
         UpdateTransport();
 
         if (WantsCapture()) captureArmed = true;
@@ -346,7 +440,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         if (Time.realtimeSinceStartup - enabledAt < 1.5f) return;
 
         string script = string.IsNullOrWhiteSpace(serverScript) ? FvpServerProcess.DefaultScriptPath : serverScript;
-        if (FvpServerProcess.TryLaunch(pythonExe, script, fvpRepo, host, port, serverIdleExitSeconds, extraServerArgs, out string err))
+        if (FvpServerProcess.TryLaunch(pythonExe, script, fvpRepo, host, port, serverIdleExitSeconds, ServerArguments, out string err))
         {
             serverLaunched = true;
             serverLaunchReal = Time.realtimeSinceStartup;
@@ -492,6 +586,8 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
             if (s.shadow != null) Destroy(s.shadow.gameObject);
             if (s.shadowRT != null) { s.shadowRT.Release(); Destroy(s.shadowRT); }
             if (s.small != null) { s.small.Release(); Destroy(s.small); }
+            for (int k = 0; k < s.frozen.Length; k++)
+                if (s.frozen[k] != null) { s.frozen[k].Release(); Destroy(s.frozen[k]); }
         }
         slots = null;
     }
@@ -580,8 +676,15 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
             height = frameH,
             cameras = sentModels,
             anims = SnapshotAnimators(),
+            scene = SnapshotScene(),
             raw = new byte[slots.Length][],
         };
+
+        EnsureGroundTruth();
+        groundTruth.Read(f.groundTruth);
+        f.frozenBuffer = frozenToggle;
+        f.frozenSerial = new int[slots.Length];
+        frozenToggle ^= 1;
 
         int gen = generation;
         building = f;
@@ -589,8 +692,11 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         readbackFailed = false;
         lastCaptureReal = Time.realtimeSinceStartup;
         wantOneShot = false;
+        f.fromStep = stepState == StepState.Rendering;
         if (stepState == StepState.Rendering) { CheckStepLength(); stepState = StepState.Idle; }
 
+        var sync = lowLatencyReadback ? new AsyncGPUReadbackRequest[slots.Length] : null;
+        var issued = lowLatencyReadback ? new bool[slots.Length] : null;
         for (int i = 0; i < slots.Length; i++)
         {
             ViewSlot s = slots[i];
@@ -602,9 +708,17 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
                 continue;
             }
             Graphics.Blit(src, s.small); // downscale (bilinear) to the sent size
+            if (WantsFrozenImage(s)) KeepFrozenImage(f, i, s, src);
             int view = i;
-            AsyncGPUReadback.Request(s.small, 0, TextureFormat.RGB24, req => OnReadback(gen, f, view, req));
+            if (lowLatencyReadback) { sync[i] = AsyncGPUReadback.Request(s.small, 0, TextureFormat.RGB24); issued[i] = true; }
+            else AsyncGPUReadback.Request(s.small, 0, TextureFormat.RGB24, req => OnReadback(gen, f, view, req));
         }
+
+        // The GPU has all three requests queued: wait for them here (they finish together, right after this frame's render)
+        // instead of collecting the callbacks 2-3 frames later.
+        if (lowLatencyReadback)
+            for (int i = 0; i < slots.Length; i++)
+                if (issued[i]) { sync[i].WaitForCompletion(); OnReadback(gen, f, i, sync[i]); }
     }
 
     // The image the camera produces: its lens-distorted output, or (no distortion) a shadow camera's render.
@@ -703,6 +817,27 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         }
     }
 
+    // Built on first use, when the scene has settled: the transforms to watch, minus the bones the Animators restore themselves.
+    FvpSceneSnapshot SnapshotScene()
+    {
+        EnsureSceneState();
+        return sceneState.Capture();
+    }
+
+    void EnsureSceneState()
+    {
+        if (sceneState.Initialized) return;
+        sceneState.trackTransforms = rewindMovingObjects;
+        sceneState.trackPhysics = rewindPhysics;
+        sceneState.trackVideo = rewindVideo;
+        var animated = new HashSet<Transform>();
+        foreach (Animator a in trackedAnimators)
+            if (a != null) foreach (Transform t in a.GetComponentsInChildren<Transform>(true)) animated.Add(t);
+        sceneState.Initialize(animated, rewindScripts);
+        Debug.Log($"[FasterVoxelPose] rewind covers: {trackedAnimators.Count} Animator(s), {(rewindMovingObjects ? "every moving transform (found as they move)" : "no generic transforms")}, " +
+                  $"{sceneState.ScriptCount} script(s), {sceneState.VideoCount} video player(s).", this);
+    }
+
     FvpAnimState[] SnapshotAnimators()
     {
         if (trackedAnimators == null || trackedAnimators.Count == 0) return null;
@@ -710,6 +845,42 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         foreach (Animator a in trackedAnimators)
             if (a != null && a.isActiveAndEnabled && a.runtimeAnimatorController != null) list.Add(FvpAnimState.Capture(a));
         return list.Count > 0 ? list.ToArray() : null;
+    }
+
+    // ---------------- ground truth + frozen images ----------------
+
+    void EnsureGroundTruth()
+    {
+        if (!groundTruth.Matches(groundTruthAvatars)) groundTruth.SetAvatars(groundTruthAvatars);
+    }
+
+    // The overlay of a camera whose lens-distorted image is presented on its display can show the frame an estimate was
+    // made from instead of the live image: a full-resolution copy of that frame is kept on the GPU.
+    bool WantsFrozenImage(ViewSlot s) => showOverlay && s.Distorted && s.calib.showOnDisplay;
+
+    void KeepFrozenImage(FvpFrame f, int view, ViewSlot s, Texture src)
+    {
+        int k = f.frozenBuffer;
+        RenderTexture rt = s.frozen[k];
+        if (rt == null || rt.width != src.width || rt.height != src.height)
+        {
+            if (rt != null) { rt.Release(); Destroy(rt); }
+            rt = new RenderTexture(src.width, src.height, 0, RenderTextureFormat.ARGB32) { name = $"FVP frozen {view}.{k}", filterMode = FilterMode.Bilinear };
+            rt.Create();
+            s.frozen[k] = rt;
+        }
+        Graphics.Blit(src, rt);
+        f.frozenSerial[view] = ++s.frozenSerial[k];
+    }
+
+    // The saved image of a frame, or null once a newer frame has reused its buffer.
+    Texture FrozenImage(FvpFrame f, int view)
+    {
+        if (f == null || slots == null || view >= slots.Length || f.frozenSerial == null || f.frozenBuffer < 0 || view >= f.frozenSerial.Length) return null;
+        ViewSlot s = slots[view];
+        RenderTexture rt = s.frozen[f.frozenBuffer];
+        if (rt == null || f.frozenSerial[view] == 0 || s.frozenSerial[f.frozenBuffer] != f.frozenSerial[view]) return null;
+        return rt;
     }
 
     // ---------------- results ----------------
@@ -725,8 +896,9 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         f.netMs = (float)m.Num("t_net");
         f.totalMs = (float)m.Num("t_total");
         BuildPeople(f);
-        tracker.Assign(f.people);
+        tracker.Assign(f.people, f.sceneTime);
         f.estimated = true;
+        f.latencyMs = (Time.realtimeSinceStartup - f.realtime) * 1000f;
 
         float now = Time.realtimeSinceStartup;
         if (lastResultReal > 0f)

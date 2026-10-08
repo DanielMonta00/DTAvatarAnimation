@@ -52,6 +52,7 @@ public static class FasterVoxelPoseInstaller
                   $"  cameras: {(fvp.cameras.Count == 0 ? "NONE FOUND - assign them in the Inspector" : string.Join(", ", fvp.cameras.Select(Describe)))}\n" +
                   $"  volume anchor: {(fvp.volumeAnchor != null ? fvp.volumeAnchor.name : "none (world origin)")}, box {fvp.volumeSize} m at +{fvp.volumeOffset}\n" +
                   $"  animators put back on rewind: {(fvp.trackedAnimators.Count == 0 ? "none" : string.Join(", ", fvp.trackedAnimators.Select(a => a.name)))}\n" +
+                  $"  ground-truth avatars (green): {(fvp.groundTruthAvatars.Count == 0 ? "NONE - assign them in the Inspector to see the green skeleton" : string.Join(", ", fvp.groundTruthAvatars.Select(a => a.name)))}\n" +
                   "  Press Play. The first run loads the model (~10 s); the skeletons appear over each camera's display.", go);
     }
 
@@ -106,7 +107,7 @@ public static class FasterVoxelPoseInstaller
     public static void StartServer(FasterVoxelPoseLive c)
     {
         string script = string.IsNullOrWhiteSpace(c.serverScript) ? FvpServerProcess.DefaultScriptPath : c.serverScript;
-        if (!FvpServerProcess.TryLaunch(c.pythonExe, script, c.fvpRepo, c.host, c.port, c.serverIdleExitSeconds, c.extraServerArgs, out string err))
+        if (!FvpServerProcess.TryLaunch(c.pythonExe, script, c.fvpRepo, c.host, c.port, c.serverIdleExitSeconds, c.ServerArguments, out string err))
             Debug.LogError("[FasterVoxelPose] cannot start the server: " + err, c);
     }
 }

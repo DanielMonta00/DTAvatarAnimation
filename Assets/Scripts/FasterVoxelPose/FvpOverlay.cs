@@ -19,6 +19,7 @@ public sealed class FvpOverlay
     public readonly FvpOverlayGraphic graphic;
     public readonly bool letterboxed;
 
+    readonly RawImage image;
     readonly Text label;
     readonly List<Text> tags = new List<Text>();
     static Font font;
@@ -44,6 +45,14 @@ public sealed class FvpOverlay
             ratio.aspectRatio = imageAspect;
         }
 
+        // Under the skeletons: a saved frame that covers the live image the presenter below shows.
+        var imageGo = new GameObject("Frame", typeof(RectTransform)) { hideFlags = HideFlags.HideAndDontSave };
+        imageGo.transform.SetParent(fit, false);
+        Stretch((RectTransform)imageGo.transform);
+        image = imageGo.AddComponent<RawImage>();
+        image.raycastTarget = false;
+        image.enabled = false;
+
         var lines = new GameObject("Skeletons", typeof(RectTransform)) { hideFlags = HideFlags.HideAndDontSave };
         lines.transform.SetParent(fit, false);
         Stretch((RectTransform)lines.transform);
@@ -54,7 +63,7 @@ public sealed class FvpOverlay
         lr.anchorMin = lr.anchorMax = new Vector2(0f, 1f);
         lr.pivot = new Vector2(0f, 1f);
         lr.anchoredPosition = new Vector2(10f, -8f);
-        lr.sizeDelta = new Vector2(1400f, 24f);
+        lr.sizeDelta = new Vector2(1400f, 44f);
     }
 
     static void Stretch(RectTransform rt)
@@ -63,7 +72,7 @@ public sealed class FvpOverlay
         rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
     }
 
-    static Text NewText(string name, Transform parent, TextAnchor align, int size)
+    internal static Text NewText(string name, Transform parent, TextAnchor align, int size, bool shadow = true)
     {
         var go = new GameObject(name, typeof(RectTransform)) { hideFlags = HideFlags.HideAndDontSave };
         go.transform.SetParent(parent, false);
@@ -80,11 +89,24 @@ public sealed class FvpOverlay
         t.horizontalOverflow = HorizontalWrapMode.Overflow;
         t.verticalOverflow = VerticalWrapMode.Overflow;
         t.raycastTarget = false;
-        var shadow = go.AddComponent<Shadow>();
-        shadow.effectColor = new Color(0f, 0f, 0f, 0.9f);
-        shadow.effectDistance = new Vector2(1.5f, -1.5f);
+        if (shadow)
+        {
+            var sh = go.AddComponent<Shadow>();
+            sh.effectColor = new Color(0f, 0f, 0f, 0.9f);
+            sh.effectDistance = new Vector2(1.5f, -1.5f);
+        }
         return t;
     }
+
+    // A saved frame to show instead of the live image (null = show the live image).
+    public void SetImage(Texture texture)
+    {
+        if (texture == null) { if (image.enabled) image.enabled = false; return; }
+        if (image.texture != texture) image.texture = texture;
+        if (!image.enabled) image.enabled = true;
+    }
+
+    public Texture Image => image.enabled ? image.texture : null;
 
     public void SetDisplay(int display) { if (canvas.targetDisplay != display) canvas.targetDisplay = display; }
     public void SetVisible(bool visible) { if (canvas.enabled != visible) canvas.enabled = visible; }

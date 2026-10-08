@@ -137,7 +137,8 @@ def run(args):
     print('config reply:', reply, '(%.1f s round trip)' % (time.time() - t0))
     assert reply['type'] == 'config_ok', reply
 
-    all_abs, times = [], []
+    all_abs, times, signed = [], [], []
+    matched_scores, ghosts = [], []
     first = None
     for fi in parse_frames(args.frames, len(frames)):
         fr = frames[fi]
@@ -160,15 +161,25 @@ def run(args):
         people = poses[poses[:, 0, 3] >= 0]
         gt = np.array([to_zup_mm([kp['position_in_world'] for kp in pr['keypoints']])[gt_sel] for pr in fr['persons']])
         errs = []
+        used_p, used_g = set(), set()
         if len(people) and len(gt):
             pj = people[:, pred_sel, :3]
             cost = np.linalg.norm(pj[:, None] - gt[None], axis=3).mean(-1)
-            used_p, used_g = set(), set()
             for _, p, g in sorted((cost[p, g], p, g) for p in range(len(pj)) for g in range(len(gt))):
                 if p in used_p or g in used_g:
                     continue
                 used_p.add(p); used_g.add(g)
                 errs.append(np.linalg.norm(pj[p] - gt[g], axis=1))
+                signed.append(pj[p] - gt[g])
+        # Who is real and who is a ghost: every estimated person that got no ground-truth partner, with its score and
+        # how far (horizontally, mm) its neck is from the nearest real person's neck.
+        for p in range(len(people)):
+            score = float(people[p, :, 4].mean())
+            if p in used_p:
+                matched_scores.append(score)
+            else:
+                d = min((np.linalg.norm(people[p, 0, :2] - g[0, :2]) for g in gt), default=float('inf'))
+                ghosts.append((fi, score, d, float(people[p, 0, 2])))
         if errs:
             all_abs.append(np.concatenate(errs))
         times.append(rt)
@@ -180,6 +191,33 @@ def run(args):
         a = np.concatenate(all_abs)
         print('\nMPJPE absolute over %d joints: %.1f mm (median %.1f)  PCK@150 %.1f %%   mean round trip %.0f ms' % (
             len(a), a.mean(), np.median(a), (a < 150).mean() * 100, np.mean(times)))
+    if matched_scores or ghosts:
+        ms = np.array(matched_scores) if matched_scores else np.zeros(0)
+        gs = np.array([g[1] for g in ghosts]) if ghosts else np.zeros(0)
+        n_frames = len(times)
+        print('\nestimated people with a ground-truth partner: %d, without (ghosts): %d over %d frames (%.0f %% of frames have one)' % (
+            len(ms), len(gs), n_frames, 100.0 * len({g[0] for g in ghosts}) / max(1, n_frames)))
+        if len(ms): print('  score of real people   min %.3f  median %.3f  max %.3f' % (ms.min(), np.median(ms), ms.max()))
+        if len(gs):
+            print('  score of ghosts        min %.3f  median %.3f  max %.3f' % (gs.min(), np.median(gs), gs.max()))
+            print('  ghosts: distance of the neck to the nearest real person (m): ' + ' '.join('%.1f' % (g[2] / 1000.0) for g in ghosts[:40]))
+            print('  ghosts: neck height (m): ' + ' '.join('%.2f' % (g[3] / 1000.0) for g in ghosts[:40]))
+            for thr in (0.1, 0.15, 0.2, 0.3, 0.4):
+                print('  min score %.2f keeps %3d %% of real people and %3d %% of ghosts' % (
+                    thr, 100 * (ms >= thr).mean() if len(ms) else 0, 100 * (gs >= thr).mean()))
+    if signed:
+        # Is the error a constant offset (a calibration / definition problem) or scatter (the network)?
+        # signed = estimate - GT in the model frame (mm, Z up), one row per matched person: (joint, xyz).
+        s = np.stack(signed)                                     # (matches, 13, 3)
+        bias = s.mean(0)                                         # per joint, the mean offset
+        scatter = np.linalg.norm(s - bias, axis=2).mean(0)       # per joint, what is left once the offset is removed
+        print('\nsigned error estimate - GT (mm, model frame x, y, z up) over %d matches:' % len(s))
+        print('  %-15s %8s %8s %8s | %6s %8s' % ('joint', 'dx', 'dy', 'dz', '|bias|', 'scatter'))
+        for k, (_, name) in enumerate(JOINT_MAP):
+            print('  %-15s %8.1f %8.1f %8.1f | %6.1f %8.1f' % (name, *bias[k], np.linalg.norm(bias[k]), scatter[k]))
+        mean_bias = bias.mean(0)
+        print('  all joints: mean offset (%.1f, %.1f, %.1f) mm = %.1f mm; mean per-joint |bias| %.1f mm, scatter %.1f mm' % (
+            *mean_bias, np.linalg.norm(mean_bias), np.linalg.norm(bias, axis=1).mean(), scatter.mean()))
     if first is not None and os.path.isfile(args.notebook_poses) and len(views) == 4:
         nb = np.load(args.notebook_poses)
         mine = first

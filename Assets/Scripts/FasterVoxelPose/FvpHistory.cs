@@ -9,9 +9,12 @@ public sealed class FvpPerson
     public int id;           // stable while the person stays in view (see FvpTracker); the network's own slot order is not
     public float score;
     public readonly Vector3[] joints = new Vector3[FvpSkeleton.Count]; // metres, Unity world, Panoptic-15 order
+    public bool[] valid;     // null = every joint valid (ground truth from a rig can lack joints)
+    public Vector3 velocity; // horizontal root velocity, m/s, from the last estimates of this id (zero for a new person)
 
     public Vector3 Root => joints[FvpSkeleton.MidHip];
     public Color Color => FvpSkeleton.ColorFor(id);
+    public bool IsValid(int joint) => valid == null || valid[joint];
 }
 
 // Where an Animator was, so rewinding can put the scene back. Layer states are restored through the
@@ -65,6 +68,7 @@ public sealed class FvpFrame
     public int width, height;
     public FvpCameraModel[] cameras;
     public FvpAnimState[] anims;
+    public FvpSceneSnapshot scene;   // everything else that moves (see FvpSceneState)
 
     // Per view, top-left origin RGB24 straight from the GPU readback (pooled): exactly what was sent to the network.
     // Valid until the frame has been answered, so read it from FrameEstimated if you need the images.
@@ -73,7 +77,14 @@ public sealed class FvpFrame
 
     public float[] poses;          // [maxPeople, 15, 5]: x, y, z (mm, model frame), valid, score
     public readonly List<FvpPerson> people = new List<FvpPerson>();
+    // Ground truth at the instant of the capture: the avatar rigs read out as the same 15 joints (see FvpGroundTruth).
+    public readonly List<FvpPerson> groundTruth = new List<FvpPerson>();
+    // Which GPU copy of each camera's image belongs to this frame (see FasterVoxelPoseLive.FrozenImage).
+    public int frozenBuffer = -1;
+    public int[] frozenSerial;
     public float netMs, totalMs;
+    public float latencyMs;        // capture -> estimate in hand
+    public bool fromStep;          // captured by a single step while paused
     public bool estimated;
     public bool evicted;           // dropped from history while buffers were still in use
 }
@@ -102,16 +113,20 @@ public static class FvpBufferPool
 public sealed class FvpTracker
 {
     public float gateMetres = 1.0f;
+    public float maxSpeed = 3.0f;      // m/s, a walking person never exceeds this; bigger jumps are estimate noise
     int nextId = 1;
     List<FvpPerson> previous = new List<FvpPerson>();
+    double previousTime;
 
-    public void Reset(IList<FvpPerson> from)
+    public void Reset(IList<FvpPerson> from, double time)
     {
         previous = from != null ? new List<FvpPerson>(from) : new List<FvpPerson>();
+        previousTime = time;
         foreach (FvpPerson p in previous) nextId = Mathf.Max(nextId, p.id + 1);
     }
 
-    public void Assign(List<FvpPerson> now)
+    // Gives every person of `now` (estimated at scene time `time`) an id, and a smoothed horizontal root velocity.
+    public void Assign(List<FvpPerson> now, double time)
     {
         var pairs = new List<(float d, int n, int p)>();
         for (int n = 0; n < now.Count; n++)
@@ -129,10 +144,22 @@ public sealed class FvpTracker
             if (usedNow[n] || usedPrev[p]) continue;
             usedNow[n] = usedPrev[p] = true;
             now[n].id = previous[p].id;
+
+            double dt = time - previousTime;
+            Vector3 v = previous[p].velocity;
+            if (dt > 0.02 && dt < 0.6)
+            {
+                Vector3 raw = (now[n].Root - previous[p].Root) / (float)dt;
+                raw.y = 0f;
+                if (raw.magnitude > maxSpeed) raw = raw.normalized * maxSpeed;
+                v = Vector3.Lerp(previous[p].velocity, raw, 0.5f); // a little smoothing: the estimate is noisy
+            }
+            now[n].velocity = v;
         }
         for (int n = 0; n < now.Count; n++)
             if (!usedNow[n]) now[n].id = nextId++;
 
         previous = new List<FvpPerson>(now);
+        previousTime = time;
     }
 }
