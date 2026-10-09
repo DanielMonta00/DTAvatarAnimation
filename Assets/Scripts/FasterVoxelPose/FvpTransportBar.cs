@@ -11,6 +11,9 @@ public sealed class FvpBarLayout
     public const int PartCount = 19;
     public const float Pad = 8f, ButtonH = 28f, Gap = 4f, Margin = 4f, ThumbW = 12f;
     public const int FontSize = 14;
+    // What "UI Scale 1" means: 1.5 x the first design (which was too small to read on a 1920 x 1080 display). Everything that is drawn
+    // by this component (bar, status card, heatmap panels, the hub's tabs) multiplies the user's UI Scale by this.
+    public const float BaseScale = 1.5f;
 
     // (part, width, space after) at scale 1
     static readonly (Part part, float width, float after)[] Row =
@@ -44,7 +47,7 @@ public sealed class FvpBarLayout
         width = w; height = h; this.expanded = expanded; this.userScale = userScale;
         System.Array.Clear(rect, 0, rect.Length);
 
-        uiScale = userScale * Mathf.Max(1, Mathf.RoundToInt(h / 1080f));
+        uiScale = userScale * BaseScale * Mathf.Max(1, Mathf.RoundToInt(h / 1080f));
         float pad = Pad * uiScale, margin = Margin * uiScale;
         if (!expanded)
         {
@@ -56,8 +59,9 @@ public sealed class FvpBarLayout
         {
             float total = 0f;
             foreach (var r in Row) total += r.width + r.after;
-            float fit = Mathf.Clamp((w - 2f * pad) / (total * uiScale), 0.5f, 1f);
-            fit = Mathf.Floor(fit * 8f) / 8f;
+            // shrinks to fit a narrow display, but no further than half the old size overall (11 px text is the readable minimum)
+            float fit = Mathf.Clamp((w - 2f * pad) / (total * uiScale), Mathf.Min(1f, 0.5f / uiScale), 1f);
+            fit = Mathf.Max(Mathf.Floor(fit * 8f) / 8f, 0.125f);
             scale = uiScale * fit;
             float x = pad, bh = Mathf.Round(ButtonH * scale);
             foreach (var r in Row)

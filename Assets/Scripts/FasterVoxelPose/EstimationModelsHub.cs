@@ -122,7 +122,7 @@ public sealed class EstimationModelsHub : MonoBehaviour
     float laidOutScale = -1f;
     bool tabsDirty = true;
 
-    public float Scale => uiScale * Mathf.Max(1, Mathf.RoundToInt(Screen.height / 1080f));
+    public float Scale => uiScale * FvpBarLayout.BaseScale * Mathf.Max(1, Mathf.RoundToInt(Screen.height / 1080f));
     public Rect TabRect(int i) { EnsureLayout(); return i >= 0 && i < tabRect.Length ? tabRect[i] : default; }
     public Rect SwatchRect(int i) { EnsureLayout(); return i >= 0 && i < swatchRect.Length ? swatchRect[i] : default; }
 

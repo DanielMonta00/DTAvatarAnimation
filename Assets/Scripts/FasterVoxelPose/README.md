@@ -114,7 +114,7 @@ A script's *serialized* fields are treated as configuration and are not restored
 
 ### The status widget
 
-One small card in the top-left corner of every display (**H** hides it, `Show Hud` in the Inspector) replaces the text that
+One card in the top-left corner of every display (**H** hides it, `Show Hud` in the Inspector; `UI Scale` sizes it together with the bar, the heatmap panels and the hub's tabs - 1 is now 1.5 x the first design, which was too small to read on a 1920 x 1080 display) replaces the text that
 used to sit over the pictures: the state (LIVE / PAUSED / REWIND), a legend, the estimates per second, the latency from
 capture to answer, **where the server spent it** (backbone + root + joints, and how many people it localised), **Unity's own frame
 rate** (and, when it is held to a rate, that), what this tool costs per frame, the place on the timeline (how far behind the
@@ -267,6 +267,18 @@ test with spheres placed near the image corners, where the distortion is stronge
 the rendered sphere while a pinhole projection would have been 69 px off. A calibrated camera shown without that
 presenter still uses `CalibratedCamera.WorldToViewport` (the same lens model); only an uncalibrated camera uses the
 engine's pinhole viewport.
+
+## The recorder's keypoints, live, with no models
+
+To watch what `MultiViewRecorder` writes into `keyrgb/` while the scene plays (recording or not) you need none of the above: no FasterVoxelPose,
+no servers, no card, no bar, no tabs. **Tools ▸ FasterVoxelPose ▸ Show live ground truth on the MultiViewRecorder's cameras** adds a
+`RecorderLiveOverlay` to the recorder's object (the scene is only marked dirty; save it to keep the component). In Play it draws, over each of
+the recorder's cameras' own displays, the joints of the recorder's **Skeleton Format** (AIC-14 by default, the recorder's head / toe offsets
+and its point radius / line thickness), projected the way the recorder projects them (a `CalibratedCamera`'s lens included), with the
+recorder's colours: left light, right dark, centre, each line the average of its two joints. It is a screen overlay, so `rgb/` and `keyrgb/`
+are untouched. Fisheye (`FulldomeCamera`) cameras are not drawn. `Show` switches it off; `Yield To Faster Voxel Pose` (on) keeps it out of the
+way when a `FasterVoxelPose` component is active, because that draws the ground truth itself (in the 15 Panoptic joints rather than the
+recorder's format). Leave the models' objects deactivated and none of their code runs.
 
 ## Several models side by side: the `EstimationModels` parent
 

@@ -126,6 +126,14 @@ public class MultiViewRecorder : MonoBehaviour
     public bool drawSkeleton = true;
     public Color bboxVisColor = new Color(1f, 1f, 0f, 1f);
 
+    [Header("Gizmos - Ground Truth Keypoints")]
+    [Tooltip("Draw ground truth keypoint gizmos in the scene view (keypoints only, no model/estimation data).")]
+    public bool drawKeypointGizmos = true;
+    [Tooltip("Radius of keypoint joint spheres in the scene gizmo.")]
+    public float gizmoJointRadius = 0.05f;
+    [Tooltip("Thickness of skeleton edge lines in the scene gizmo.")]
+    public float gizmoLineWidth = 0.01f;
+
     // Active format + derived data, resolved when recording begins.
     SkeletonFormats.SkeletonDef def;
     Color32[] kpColors;
@@ -1486,6 +1494,72 @@ public class MultiViewRecorder : MonoBehaviour
             {
                 jsonWriter.Dispose();
                 jsonWriter = null;
+            }
+        }
+    }
+
+    // ===== GIZMO DRAWING (Ground Truth Keypoints Only) =====
+
+    void OnDrawGizmos()
+    {
+        if (!drawKeypointGizmos || rigs.Count == 0) return;
+        if (def == null) return;
+
+        // Only draw if we have resolved the skeleton format and keypoint definitions
+        if (kpColors == null) return;
+
+        DrawGroundTruthGizmos();
+    }
+
+    void DrawGroundTruthGizmos()
+    {
+        int personCount = rigs.Count;
+        int kpCount = def.Count;
+
+        // Compute world-space keypoint positions (same logic as CaptureRoutine)
+        for (int p = 0; p < personCount; p++)
+        {
+            var rig = rigs[p];
+            if (!rig.bonesResolved) continue;
+
+            var worldPos = new Vector3[kpCount];
+            var valid = new bool[kpCount];
+
+            // Compute keypoints
+            for (int k = 0; k < kpCount; k++)
+            {
+                var j = def.joints[k];
+                worldPos[k] = SkeletonFormats.WorldPosition(rig.rb, j, offsets, out bool validKp);
+                valid[k] = validKp;
+            }
+
+            // Draw skeleton edges
+            if (drawSkeleton && def.edges != null)
+            {
+                for (int e = 0; e < def.edges.GetLength(0); e++)
+                {
+                    int a = def.edges[e, 0];
+                    int b = def.edges[e, 1];
+
+                    if (a < 0 || a >= kpCount || b < 0 || b >= kpCount) continue;
+                    if (!valid[a] || !valid[b]) continue;
+
+                    Color colorA = kpColors[a];
+                    Color colorB = kpColors[b];
+                    Color edgeColor = Color.Lerp(colorA, colorB, 0.5f);
+
+                    Gizmos.color = edgeColor;
+                    Gizmos.DrawLine(worldPos[a], worldPos[b]);
+                }
+            }
+
+            // Draw keypoint joints
+            for (int k = 0; k < kpCount; k++)
+            {
+                if (!valid[k]) continue;
+
+                Gizmos.color = kpColors[k];
+                Gizmos.DrawSphere(worldPos[k], gizmoJointRadius);
             }
         }
     }

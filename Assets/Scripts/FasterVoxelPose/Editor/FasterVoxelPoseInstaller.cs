@@ -135,6 +135,26 @@ public static class FasterVoxelPoseInstaller
         return null;
     }
 
+    // ---- the recorder's own live overlay ----
+
+    [MenuItem("Tools/FasterVoxelPose/Show live ground truth on the MultiViewRecorder's cameras")]
+    public static void AddRecorderLiveOverlay()
+    {
+        MultiViewRecorder[] recorders = Object.FindObjectsByType<MultiViewRecorder>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+        if (recorders.Length == 0) { Debug.LogWarning("[RecorderLiveOverlay] no MultiViewRecorder in the open scene."); return; }
+        int added = 0;
+        foreach (MultiViewRecorder r in recorders)
+        {
+            if (r.TryGetComponent(out RecorderLiveOverlay _)) continue;
+            Undo.AddComponent<RecorderLiveOverlay>(r.gameObject);
+            EditorSceneManager.MarkSceneDirty(r.gameObject.scene);   // not saved: the scene is usually open with unsaved work
+            added++;
+        }
+        Debug.Log(added > 0
+            ? $"[RecorderLiveOverlay] added to {added} MultiViewRecorder(s): in Play the recorder's keypoints (what keyrgb shows) are drawn live over its cameras' displays. Save the scene to keep it."
+            : "[RecorderLiveOverlay] every MultiViewRecorder already has it.");
+    }
+
     // ---- server ----
 
     [MenuItem("Tools/FasterVoxelPose/Stop inference server")]
