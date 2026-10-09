@@ -63,13 +63,19 @@ public partial class FasterVoxelPoseLive
     // since, but only so far: past this the guess is worse than the lag.
     const float MaxCompensationSeconds = 1.0f;
 
+    // The nearest estimate is drawn this faint beside a frame that has none of its own yet.
+    const float StaleAlpha = 0.4f;
+
     void UpdateOverlays()
     {
-        if (!showOverlay || cameras == null || cameras.Count == 0) { HideOverlays(); return; }
+        bool drawGt = showGroundTruth && GroundTruthVisible, drawEst = showEstimate && OverlayVisible;
+        if (!showOverlay || (!drawGt && !drawEst) || cameras == null || cameras.Count == 0) { HideOverlays(); return; }
         EnsureOverlayViews();
         EnsureGroundTruth();
 
-        FvpFrame f = IsReady ? displayed : null;
+        FvpFrame shown = IsReady ? displayed : null;          // the frame the transport is on
+        bool pending = shown != null && shown.placeholder;    // ... a moment that has no estimate (yet)
+        FvpFrame f = pending ? staleFrom : shown;             // whose estimate is drawn
         bool live = IsLive;
         bool liveRigRead = false;
 
@@ -95,18 +101,18 @@ public partial class FasterVoxelPoseLive
 
             // Which image sits under the skeletons decides which instant they are drawn for.
             Texture frozen = null;
-            if (letterbox && f != null)
+            if (letterbox && shown != null && !pending)
             {
                 bool want = overlayImage == OverlayImage.SyncedFrame ? (!paused || Estimating) : (paused && SteppingPending);
-                if (want) frozen = FrozenImage(f, i);
+                if (want) frozen = FrozenImage(shown, i);
             }
             bool frozenShown = frozen != null;
             ov.SetImage(frozen);
 
             IList<FvpPerson> gt = null;
-            if (showGroundTruth)
+            if (drawGt)
             {
-                if (f != null && (frozenShown || !live)) gt = f.groundTruth;   // that frame's instant
+                if (shown != null && (frozenShown || !live)) gt = shown.groundTruth;   // that frame's instant
                 else
                 {
                     if (!liveRigRead) { groundTruth.Read(liveGroundTruth); liveRigRead = true; }
@@ -114,19 +120,27 @@ public partial class FasterVoxelPoseLive
                 }
             }
 
-            FvpCameraModel model = f != null && f.cameras != null && i < f.cameras.Length ? f.cameras[i]
+            FvpFrame cam = shown ?? f;
+            FvpCameraModel model = cam != null && cam.cameras != null && i < cam.cameras.Length ? cam.cameras[i]
                                  : sentModels != null && i < sentModels.Length ? sentModels[i] : null;
 
             ov.graphic.Begin();
             if (gt != null)
                 for (int g = 0; g < gt.Count; g++) DrawSkeleton(ov, v, model, gt[g], Vector3.zero, true);
 
-            if (f != null && showEstimate)
+            if (f != null && drawEst)
             {
                 // Estimate older than the live image it is drawn on: bring it forward by what the person moved meanwhile.
-                float lag = live && !frozenShown && latencyCompensation ? Mathf.Clamp((float)(Time.timeAsDouble - f.sceneTime), 0f, MaxCompensationSeconds) : 0f;
+                float lag = live && !frozenShown && latencyCompensation ? Mathf.Clamp((float)(SceneNow - f.sceneTime), 0f, MaxCompensationSeconds) : 0f;
+                ov.graphic.alpha = pending ? StaleAlpha : 1f;
                 List<FvpPerson> people = f.people;
-                for (int k = 0; k < people.Count; k++) DrawSkeleton(ov, v, model, people[k], people[k].velocity * lag, false);
+                float baseAlpha = ov.graphic.alpha;
+                for (int k = 0; k < people.Count; k++)
+                {
+                    ov.graphic.alpha = people[k].phantom ? baseAlpha * 0.35f : baseAlpha;     // Mark mode: a phantom stays, faint
+                    DrawSkeleton(ov, v, model, people[k], people[k].velocity * lag, false);
+                }
+                ov.graphic.alpha = 1f;
             }
             ov.graphic.End();
         }

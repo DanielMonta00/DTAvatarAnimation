@@ -5,27 +5,30 @@ using System.Text;
 using UnityEngine;
 using Debug = UnityEngine.Debug;
 
-// Starts, finds and stops Server~/fvp_server.py. The server is started without redirected pipes (nobody would
-// drain them once Unity moves on) and logs to a file instead, which FvpLogTail echoes into the Console.
-// It keeps running after Play ends, so the next Play skips the model load; it exits by itself after
-// --idle-exit seconds without a client, and Unity stops it on quit.
+// Starts, finds and stops the inference servers (Server~/fvp_server.py for Faster-VoxelPose, Server~/vitpose_server.py for ViTPose,
+// each one named). A server is started without redirected pipes (nobody would drain them once Unity moves on) and logs to a file
+// of its own, which FvpLogTail echoes into the Console. It keeps running after Play ends, so the next Play skips the model load;
+// it exits by itself after --idle-exit seconds without a client, and Unity stops it on quit.
 public static class FvpServerProcess
 {
-    const string PidKey = "FasterVoxelPose.ServerPid";
+    public const string FvpName = "fvp_server", ViTPoseName = "vitpose_server";
+    public static readonly string[] AllNames = { FvpName, ViTPoseName };
 #if !UNITY_EDITOR
-    static int fallbackPid; // players have no SessionState
+    static readonly System.Collections.Generic.Dictionary<string, int> fallbackPids = new System.Collections.Generic.Dictionary<string, int>(); // players have no SessionState
 #endif
 
-    public static string LogPath
+    // The key of the first server stays what it was, so a server started before this existed is still found.
+    static string PidKey(string name) => name == FvpName ? "FasterVoxelPose.ServerPid" : "FasterVoxelPose.ServerPid." + name;
+
+    public static string LogPath => LogPathOf(FvpName);
+
+    public static string LogPathOf(string name)
     {
-        get
-        {
 #if UNITY_EDITOR
-            return Path.GetFullPath(Path.Combine(Application.dataPath, "..", "Logs", "fvp_server.log"));
+        return Path.GetFullPath(Path.Combine(Application.dataPath, "..", "Logs", name + ".log"));
 #else
-            return Path.Combine(Application.persistentDataPath, "fvp_server.log");
+        return Path.Combine(Application.persistentDataPath, name + ".log");
 #endif
-        }
     }
 
     // Where the server keeps the last configuration it was given (the next start builds its voxel grids from it).
@@ -41,34 +44,35 @@ public static class FvpServerProcess
         }
     }
 
-    public static string DefaultScriptPath =>
-        Path.GetFullPath(Path.Combine(Application.dataPath, "Scripts", "FasterVoxelPose", "Server~", "fvp_server.py"));
+    public static string ScriptPath(string file) =>
+        Path.GetFullPath(Path.Combine(Application.dataPath, "Scripts", "FasterVoxelPose", "Server~", file));
 
-    static int Pid
+    public static string DefaultScriptPath => ScriptPath("fvp_server.py");
+
+    static int GetPid(string name)
     {
-        get
-        {
 #if UNITY_EDITOR
-            return UnityEditor.SessionState.GetInt(PidKey, 0);
+        return UnityEditor.SessionState.GetInt(PidKey(name), 0);
 #else
-            return fallbackPid;
+        return fallbackPids.TryGetValue(name, out int pid) ? pid : 0;
 #endif
-        }
-        set
-        {
-#if UNITY_EDITOR
-            UnityEditor.SessionState.SetInt(PidKey, value);
-#else
-            fallbackPid = value;
-#endif
-        }
     }
 
-    public static bool IsRunning => Find() != null;
-
-    static Process Find()
+    static void SetPid(string name, int pid)
     {
-        int pid = Pid;
+#if UNITY_EDITOR
+        UnityEditor.SessionState.SetInt(PidKey(name), pid);
+#else
+        fallbackPids[name] = pid;
+#endif
+    }
+
+    public static bool IsRunning => IsRunningOf(FvpName);
+    public static bool IsRunningOf(string name) => Find(name) != null;
+
+    static Process Find(string name)
+    {
+        int pid = GetPid(name);
         if (pid == 0) return null;
         try
         {
@@ -77,27 +81,38 @@ public static class FvpServerProcess
         }
         catch (ArgumentException) { } // no such process
         catch (InvalidOperationException) { }
-        Pid = 0;
+        SetPid(name, 0);
         return null;
     }
 
+    // Faster-VoxelPose
     public static bool TryLaunch(string pythonExe, string script, string repo, string host, int port, int idleExitSeconds,
                                  string extraArgs, out string error)
     {
         error = null;
-        if (IsRunning) return true;
+        if (!Directory.Exists(repo)) { error = $"Faster-VoxelPose repo not found: {repo}"; return false; }
+        return Launch(FvpName, pythonExe, script, $"--repo \"{repo}\"", host, port, idleExitSeconds, extraArgs, out error);
+    }
+
+    // Any server of this family: `fixedArgs` are the arguments that name its models (e.g. --repo, or --vitpose-dir and --yolo).
+    public static bool Launch(string name, string pythonExe, string script, string fixedArgs, string host, int port, int idleExitSeconds,
+                              string extraArgs, out string error)
+    {
+        error = null;
+        if (IsRunningOf(name)) return true;
         if (!File.Exists(pythonExe)) { error = $"Python not found: {pythonExe}"; return false; }
         if (!File.Exists(script)) { error = $"Server script not found: {script}"; return false; }
-        if (!Directory.Exists(repo)) { error = $"Faster-VoxelPose repo not found: {repo}"; return false; }
 
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(LogPath));
+            string log = LogPathOf(name);
+            Directory.CreateDirectory(Path.GetDirectoryName(log));
             var args = new StringBuilder();
-            args.Append("-u \"").Append(script).Append("\" --repo \"").Append(repo).Append('"');
+            args.Append("-u \"").Append(script).Append('"');
+            if (!string.IsNullOrWhiteSpace(fixedArgs)) args.Append(' ').Append(fixedArgs);
             args.Append(" --host ").Append(host).Append(" --port ").Append(port);
             args.Append(" --idle-exit ").Append(idleExitSeconds);
-            args.Append(" --log-file \"").Append(LogPath).Append('"');
+            args.Append(" --log-file \"").Append(log).Append('"');
             args.Append(" --cache-dir \"").Append(CacheDir).Append('"');
             if (!string.IsNullOrWhiteSpace(extraArgs)) args.Append(' ').Append(extraArgs);
 
@@ -112,8 +127,8 @@ public static class FvpServerProcess
             psi.EnvironmentVariables["PYTHONUNBUFFERED"] = "1";
             psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
             Process p = Process.Start(psi);
-            Pid = p.Id;
-            Debug.Log($"[FasterVoxelPose] started server (pid {p.Id}): {pythonExe} {psi.Arguments}");
+            SetPid(name, p.Id);
+            Debug.Log($"[FasterVoxelPose] started {name} (pid {p.Id}): {pythonExe} {psi.Arguments}");
             return true;
         }
         catch (Exception e)
@@ -123,13 +138,26 @@ public static class FvpServerProcess
         }
     }
 
-    public static void Stop()
+    // Windows scheduling class of a server (CPU priority class and the class the GPU scheduler uses between processes).
+    public enum Priority { Normal = 0, Above = 1, High = 2 }
+
+    public static string PriorityArguments(Priority p) =>
+        p == Priority.Normal ? "" : p == Priority.Above ? "--cpu-priority above --gpu-priority above" : "--cpu-priority high --gpu-priority high";
+
+    public static void Stop() => StopNamed(FvpName);
+
+    public static void StopAll()
     {
-        Process p = Find();
+        foreach (string n in AllNames) StopNamed(n);
+    }
+
+    public static void StopNamed(string name)
+    {
+        Process p = Find(name);
         if (p == null) return;
         try { p.Kill(); p.WaitForExit(2000); }
-        catch (Exception e) { Debug.LogWarning("[FasterVoxelPose] could not stop the server: " + e.Message); }
-        Pid = 0;
+        catch (Exception e) { Debug.LogWarning($"[FasterVoxelPose] could not stop {name}: " + e.Message); }
+        SetPid(name, 0);
     }
 }
 

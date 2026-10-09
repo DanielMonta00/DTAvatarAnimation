@@ -24,7 +24,7 @@ using UnityEngine.Rendering;
 // estimate always describes the latest scene, a little behind it (the latency shown in the status line).
 [DisallowMultipleComponent]
 [DefaultExecutionOrder(800)]
-public partial class FasterVoxelPoseLive : MonoBehaviour
+public partial class FasterVoxelPoseLive : MonoBehaviour, IEstimationModel
 {
     [Header("Cameras (view order)")]
     [Tooltip("The views fed to the network. CalibratedCameras use their calibrated K and lens distortion; plain Cameras a pinhole from their field of view. At least two. Auto-wired on Reset / via the context menu.")]
@@ -46,7 +46,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
     [Min(320)] public int frameWidth = 960;
     [Tooltip("Cap on estimates per second while live. 0 = as fast as the server answers.")]
     [Min(0f)] public float maxFps = 0f;
-    [Tooltip("Read the camera images back as soon as they are rendered instead of letting the GPU readback arrive 2-3 rendered frames later. Cuts the latency of every estimate (more the heavier the scene) at the cost of a short stall of the main thread each time a frame is captured.")]
+    [Tooltip("Read the camera images back as soon as they are rendered instead of letting the GPU readback arrive 2-3 rendered frames later, at the cost of a stall of the main thread each time a frame is captured (34 ms measured on a busy GPU). Only used while Unity runs below 25 fps, where the wait for 2-3 frames is longer than the stall; above that the readback is asynchronous.")]
     public bool lowLatencyReadback = true;
     [Tooltip("Run the 2D ResNet in half precision on the server: ~15 ms faster per frame, same accuracy on the recorded session (147.5 mm vs 147.5 mm MPJPE).")]
     public bool fastBackbone = true;
@@ -77,7 +77,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
     public string extraServerArgs = "";
 
     // Everything after the fixed arguments of the server command line.
-    public string ServerArguments => ((fastBackbone ? "--fp16 " : "") + extraServerArgs).Trim();
+    public string ServerArguments => ((fastBackbone ? "--fp16 " : "") + FvpServerProcess.PriorityArguments(serverPriority) + " " + extraServerArgs).Trim();
 
     [Header("Playback")]
     [Tooltip("Estimates kept for rewinding (skeletons + Animator states; a few kB each).")]
@@ -336,8 +336,9 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         displayed = null; cursor = 0; followHead = true;
         inFlight = building = null; readbackPending = 0;
         configAcked = false; sentModels = null; configId = 0;
-        serverLaunched = false; serverError = null;
-        paused = false; autoDir = 0; stepQueue = 0; stepState = StepState.Idle; wantOneShot = false;
+        serverLaunched = false; serverError = null; serverVersion = 0; restartedOutdated = false;
+        paused = false; autoDir = 0; stepQueue.Clear(); stepState = StepState.Idle; wantOneShot = false;
+        moments.Clear(); lastMoment = null; staleFrom = null; viewTime = 0.0; estimateDue = 0f; clockOffset = 0.0;
         tracker.gateMetres = trackGateMetres;
         tracker.Reset(null, 0);
 
@@ -389,12 +390,14 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         DestroyOverlays();
         DestroyBars();
         DestroyHeat();
+        ReleaseBudget();
         // Worker threads may still be sending / encoding: their buffers are simply left to the GC.
         releaseWatch.Clear();
         FvpBufferPool.Clear();
 
         Application.runInBackground = prevRunInBackground;
         if (stopServerWhenDone) FvpServerProcess.Stop();
+        frameConsumers.Clear();
         if (Instance == this) Instance = null;
     }
 
@@ -405,6 +408,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         if (!Application.isPlaying) return;
         long frameStart = Stamp();
         NoteFrame();
+        ApplyBudget();
 
         PollLogs();
         PumpClient();
@@ -418,6 +422,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
             DropInFlight();
         }
         if (client != null && linkUp) UpdateConfig();
+        else if (slots == null && ConsumersWant) EnsureSlots();
         PollInput();
         UpdateTransport();
 
@@ -479,7 +484,9 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
                     DropInFlight();
                     break;
                 case "hello":
-                    Debug.Log($"[FasterVoxelPose] server ready on {m.Str("gpu")} ({m.Str("device")}), preprocess '{m.Str("preprocess")}'.");
+                    serverVersion = (int)m.Num("server_version", 1);
+                    Debug.Log($"[FasterVoxelPose] server ready on {m.Str("gpu")} ({m.Str("device")}), preprocess '{m.Str("preprocess")}', version {serverVersion}.");
+                    OnServerVersion();
                     break;
                 case "config_ok":
                     if ((int)m.Num("config_id") == configId)
@@ -641,20 +648,24 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
 
     bool WantsCapture()
     {
-        if (!IsReady || problem != null) return false;
+        if (problem != null || slots == null) return false;
         if (inFlight != null || building != null) return false;
+        // FasterVoxelPose itself is not up (its server): keep serving the models that share its cameras, at their pace
+        if (!IsReady) return !paused && ConsumersWant && RateAllows();
+        // Every running model takes every frame (the slowest sets the pace) instead of a model that is still busy missing every other one
+        if (modelsInLockstep && ConsumerBusy) return false;
         if (paused) return wantOneShot;
-        if (maxFps > 0f && Time.realtimeSinceStartup - lastCaptureReal < 1f / maxFps) return false;
-        return true;
+        return RateAllows();
     }
+
+    bool RateAllows() => !(maxFps > 0f && Time.realtimeSinceStartup - lastCaptureReal < 1f / maxFps);
 
     // SRP: all cameras of the frame (and their lens-distortion remaps) are done when this fires. The Scene view is
     // rendered in a context of its own, so wait for the one that holds our cameras.
     void OnEndContextRendering(ScriptableRenderContext context, List<Camera> rendered)
     {
-        if (!captureArmed || slots == null) return;
-        if (!rendered.Contains(slots[0].cam)) return;
-        CaptureNow();
+        if (cameras == null || cameras.Count == 0 || cameras[0] == null || !rendered.Contains(cameras[0])) return;
+        OnFrameRendered();
     }
 
     IEnumerator EndOfFrameLoop()
@@ -662,28 +673,44 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         while (true)
         {
             yield return new WaitForEndOfFrame();
-            if (captureArmed) CaptureNow();
+            OnFrameRendered();
         }
     }
+
+    // The cameras of this frame are drawn: note the scene's state on the dense timeline, then take the frame if one is wanted.
+    void OnFrameRendered()
+    {
+        if (momentFrame != Time.frameCount) { momentFrame = Time.frameCount; RecordMomentIfDue(); }
+        if (captureArmed && slots != null) CaptureNow();
+    }
+
+    int momentFrame = -1;
 
     void CaptureNow()
     {
         captureArmed = false;
-        if (!IsReady || inFlight != null || building != null || slots == null) return;
+        bool fvpMode = IsReady;       // false: only the models that share the cameras want this frame
+        if (slots == null || inFlight != null || building != null) return;
+        if (!fvpMode && !ConsumersWant) return;
 
+        // Paused on a moment of the past: the scene was put back there, but the clock stayed where it was paused.
+        bool pastMoment = paused && displayed != null && displayed.placeholder && stepState != StepState.Rendering;
+        bool sameFrameMoment = lastMoment != null && momentFrame == Time.frameCount && !pastMoment && Math.Abs(lastMoment.sceneTime - SceneNow) < 1e-9;
         var f = new FvpFrame
         {
             id = ++frameCounter,
-            sceneTime = Time.timeAsDouble,
+            sceneTime = pastMoment ? viewTime : SceneNow,
             unityFrame = Time.frameCount,
             realtime = Time.realtimeSinceStartup,
             width = frameW,
             height = frameH,
-            cameras = sentModels,
-            anims = SnapshotAnimators(),
-            scene = SnapshotScene(),
+            cameras = fvpMode ? sentModels : (sentModels ?? BuildModels()),
+            anims = !fvpMode ? null : sameFrameMoment ? lastMoment.anims : SnapshotAnimators(),
+            scene = !fvpMode ? null : sameFrameMoment ? lastMoment.scene : SnapshotScene(),
+            consumerOnly = !fvpMode,
             raw = new byte[slots.Length][],
         };
+        if (fvpMode && !pastMoment && !sameFrameMoment) RecordMomentFromFrame(f);
 
         EnsureGroundTruth();
         groundTruth.Read(f.groundTruth);
@@ -701,8 +728,10 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         if (stepState == StepState.Rendering) { CheckStepLength(); stepState = StepState.Idle; }
 
         long captureStart = Stamp();
-        var sync = lowLatencyReadback ? new AsyncGPUReadbackRequest[slots.Length] : null;
-        var issued = lowLatencyReadback ? new bool[slots.Length] : null;
+        // Blocking only helps when frames are slow (2-3 frames is then a long wait); at a good frame rate the blocking wait is the hitch.
+        bool blocking = lowLatencyReadback && smoothDt > 0.04f;
+        var sync = blocking ? new AsyncGPUReadbackRequest[slots.Length] : null;
+        var issued = blocking ? new bool[slots.Length] : null;
         for (int i = 0; i < slots.Length; i++)
         {
             ViewSlot s = slots[i];
@@ -714,15 +743,15 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
                 continue;
             }
             Graphics.Blit(src, s.small); // downscale (bilinear) to the sent size
-            if (WantsFrozenImage(s)) KeepFrozenImage(f, i, s, src);
+            if (fvpMode && WantsFrozenImage(s)) KeepFrozenImage(f, i, s, src);
             int view = i;
-            if (lowLatencyReadback) { sync[i] = AsyncGPUReadback.Request(s.small, 0, TextureFormat.RGB24); issued[i] = true; }
+            if (blocking) { sync[i] = AsyncGPUReadback.Request(s.small, 0, TextureFormat.RGB24); issued[i] = true; }
             else AsyncGPUReadback.Request(s.small, 0, TextureFormat.RGB24, req => OnReadback(gen, f, view, req));
         }
 
         // The GPU has all three requests queued: wait for them here (they finish together, right after this frame's render)
         // instead of collecting the callbacks 2-3 frames later.
-        if (lowLatencyReadback)
+        if (blocking)
             for (int i = 0; i < slots.Length; i++)
                 if (issued[i]) { sync[i].WaitForCompletion(); OnReadback(gen, f, i, sync[i]); }
         profCapture.ticks += Stamp() - captureStart;
@@ -787,9 +816,14 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         }
         failedWarned = false;
 
-        // The buffers go back to the pool once they have been sent (and the frame has been answered).
-        f.pendingOps = 1;
+        // The buffers go back to the pool once they have been sent (and the frame has been answered), and every model that took
+        // the frame (NotifyConsumers) is done with them.
+        bool toFvp = !f.consumerOnly;
+        f.pendingOps = toFvp ? 1 : 0;
+        if (!toFvp) f.evicted = true;     // nothing will answer this one: its buffers go back as soon as the models that took it are done
         releaseWatch.Add(f);
+        NotifyConsumers(f);
+        if (!toFvp) return;
         inFlight = f;
 
         var parts = new List<ArraySegment<byte>>(f.raw.Length);
@@ -904,8 +938,13 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
         ReadHeat(f, m);
         f.netMs = (float)m.Num("t_net");
         f.totalMs = (float)m.Num("t_total");
-        BuildPeople(f);
-        tracker.Assign(f.people, f.sceneTime);
+        f.backboneMs = (float)m.Num("t_backbone"); f.rootMs = (float)m.Num("t_root"); f.jointMs = (float)m.Num("t_joint");
+        f.proposals = (int)m.Num("proposals", -1);
+        BuildPeople(f, ReadSupport(m, f.poses.Length / (FvpProtocol.JointCount * FvpProtocol.PoseStride)));
+        EvaluatePhantoms(f);
+        bool inOrder = history.Count == 0 || f.sceneTime >= history[history.Count - 1].sceneTime;
+        if (inOrder) tracker.Assign(f.people, f.sceneTime);
+        else AssignIdsInPast(f);
         CompareWithGroundTruth(f.people, f.groundTruth);
         f.estimated = true;
         f.latencyMs = (Time.realtimeSinceStartup - f.realtime) * 1000f;
@@ -920,10 +959,20 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
 
         AppendToHistory(f);
         OnHeatFrame(f);
-        FrameEstimated?.Invoke(f);
+        if (inOrder) FrameEstimated?.Invoke(f);     // an estimate made for a past moment is not "new": subscribers get the present only
     }
 
-    void BuildPeople(FvpFrame f)
+    // An estimate for the past: its ids follow from the estimate before it, and the tracker keeps following the newest one.
+    void AssignIdsInPast(FvpFrame f)
+    {
+        int before = EstimateIndexAtOrBefore(f.sceneTime - SameInstant);
+        FvpFrame newest = history[history.Count - 1];
+        tracker.Reset(before >= 0 ? history[before].people : null, before >= 0 ? history[before].sceneTime : f.sceneTime);
+        tracker.Assign(f.people, f.sceneTime);
+        tracker.Reset(newest.people, newest.sceneTime);
+    }
+
+    void BuildPeople(FvpFrame f, float[][] support = null)
     {
         f.people.Clear();
         int rows = f.poses.Length / (FvpProtocol.JointCount * FvpProtocol.PoseStride);
@@ -934,6 +983,7 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
             if (valid < 0f || score < minScore) continue;
 
             var person = new FvpPerson { score = score };
+            if (support != null && p < support.Length && support[p] != null) { person.support = support[p]; person.meanSupport = MeanSupport(support[p]); }
             for (int j = 0; j < FvpProtocol.JointCount; j++)
             {
                 int o = b + j * FvpProtocol.PoseStride;
@@ -946,19 +996,38 @@ public partial class FasterVoxelPoseLive : MonoBehaviour
 
     void AppendToHistory(FvpFrame f)
     {
-        history.Add(f);
+        bool atEnd = history.Count == 0 || f.sceneTime >= history[history.Count - 1].sceneTime;
+        int at = history.Count;
+        if (atEnd) history.Add(f);
+        else
+        {
+            // made on demand for a moment of the past: it goes where it belongs, and what the cursor pointed at moves with it
+            at = EstimateIndexAtOrBefore(f.sceneTime) + 1;
+            history.Insert(at, f);
+            if (cursor >= at) cursor++;
+        }
+        bool wasShown = displayed != null && displayed.placeholder && (Math.Abs(displayed.sceneTime - f.sceneTime) < SameInstant || (f.fromStep && atEnd));
         while (history.Count > historyFrames)
         {
             Evict(history[0]);
             history.RemoveAt(0);
             cursor = Mathf.Max(0, cursor - 1);
+            at--;
         }
-        if (followHead)
+        if (wasShown)
+        {
+            // the estimate the user was waiting for: it replaces the placeholder and the dim stale skeleton
+            cursor = Mathf.Max(0, at);
+            followHead = cursor == history.Count - 1 && f.sceneTime >= TimelineEnd - SameInstant;
+            Show(f);
+        }
+        else if (!atEnd) { if (displayed != null && !displayed.placeholder) Show(history[cursor]); }
+        else if (followHead)
         {
             cursor = history.Count - 1;
             Show(f);
         }
-        else Show(history[cursor]); // the frame under the cursor may just have changed if the oldest one was dropped
+        else if (displayed != null && !displayed.placeholder) Show(history[cursor]); // the frame under the cursor may just have changed if the oldest one was dropped
     }
 
     static void Evict(FvpFrame f)

@@ -13,10 +13,10 @@ public partial class FasterVoxelPoseLive
         if (drawCaptureVolume) DrawVolume();
         if (!Application.isPlaying || !drawSkeleton || displayed == null) return;
 
-        if (showGroundTruth)
+        if (showGroundTruth && GroundTruthVisible)
             foreach (FvpPerson p in displayed.groundTruth) DrawGizmoSkeleton(p, true);
 
-        if (!showEstimate) return;
+        if (!showEstimate || !OverlayVisible) return;
         foreach (FvpPerson p in displayed.people)
         {
             DrawGizmoSkeleton(p, false);

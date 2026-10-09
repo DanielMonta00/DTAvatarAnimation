@@ -105,6 +105,7 @@ def main():
     ap.add_argument('--views', default='1,2,3,4', help='1-based camera indices to send')
     ap.add_argument('--heat-joint', type=int, default=None,
                     help='ask for the 2D heatmaps of this Panoptic joint (0 neck, 3 l-shoulder, 7 l-knee, 8 l-ankle... -1 = all) and check them against the true 2D joint positions')
+    ap.add_argument('--min-score', type=float, default=0.1, help='the detection gate of the network (Unity sends 0.1)')
     ap.add_argument('--interval-ms', type=float, default=0.0, help='wait this long after every answer, like a live client that only sends every few hundred ms')
     ap.add_argument('--notebook-poses', default=r'C:/Users/vdmontanacuellar/Documents/Daniel/AProjectPTZCameras/DanielExperiments/Estimation/Faster-VoxelPose/output_multiview/fused_poses_frame120.npy')
     args = ap.parse_args()
@@ -158,7 +159,7 @@ def run(args):
     hello, _ = read_packet(sock)
     print('hello:', hello)
 
-    cfg = {'type': 'config', 'config_id': 1, 'width': w, 'height': h, 'min_score': 0.1,
+    cfg = {'type': 'config', 'config_id': 1, 'width': w, 'height': h, 'min_score': args.min_score,
            'space_center': centre.tolist(), 'space_size': [8000.0, 8000.0, 2000.0],
            'voxels_per_axis': [80, 80, 20], 'max_people': 10,
            'cameras': [camera_message(c) for c in cams]}
@@ -169,6 +170,7 @@ def run(args):
     assert reply['type'] == 'config_ok', reply
 
     heat_stats = []
+    n_valid = []
     all_abs, times, signed = [], [], []
     matched_scores, ghosts = [], []
     first = None
@@ -180,7 +182,7 @@ def run(args):
             imgs.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
         payload = np.stack(imgs).tobytes()
         t0 = time.time()
-        frame_msg = {'type': 'frame', 'id': fi, 'config_id': 1, 'views': len(imgs), 'width': w, 'height': h, 'min_score': 0.1}
+        frame_msg = {'type': 'frame', 'id': fi, 'config_id': 1, 'views': len(imgs), 'width': w, 'height': h, 'min_score': args.min_score}
         if args.heat_joint is not None:
             frame_msg.update({'heat': 1, 'heat_joint': args.heat_joint})
         send_packet(sock, frame_msg, payload)
@@ -196,6 +198,7 @@ def run(args):
         if first is None and fi == 120:
             first = poses
         people = poses[poses[:, 0, 3] >= 0]
+        n_valid.append(len(people))
         gt = np.array([to_zup_mm([kp['position_in_world'] for kp in pr['keypoints']])[gt_sel] for pr in fr['persons']])
         errs = []
         used_p, used_g = set(), set()
@@ -230,6 +233,8 @@ def run(args):
         a = np.concatenate(all_abs)
         print('\nMPJPE absolute over %d joints: %.1f mm (median %.1f)  PCK@150 %.1f %%   mean round trip %.0f ms' % (
             len(a), a.mean(), np.median(a), (a < 150).mean() * 100, np.mean(times)))
+    if n_valid:
+        print('\nproposals the network kept per frame (gate %.2f): mean %.1f, max %d' % (args.min_score, sum(n_valid) / len(n_valid), max(n_valid)))
     if heat_stats:
         e = np.array(heat_stats)
         print('\n2D heatmap of joint %d, laid over the sent frame: strongest peak vs the true 2D joint of the nearest person: '

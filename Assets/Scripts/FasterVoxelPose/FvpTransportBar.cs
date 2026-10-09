@@ -6,17 +6,20 @@ using UnityEngine.UI;
 // text laid out on a fractional position is resampled and comes out blurry.
 public sealed class FvpBarLayout
 {
-    public enum Part { None, ToStart, Rewind, StepBack, PlayPause, StepForward, Replay, ToNewest, Slider, Counter, Mode, Hide, Show }
-    public const int PartCount = 13;
+    // BackLong / BackMid / StepBack: one second, ten frames, one frame back (and the same forward); Prev/NextEstimate: the estimate before / after.
+    public enum Part { None, ToStart, Rewind, PrevEstimate, BackLong, BackMid, StepBack, PlayPause, StepForward, FwdMid, FwdLong, NextEstimate, Replay, ToNewest, Slider, Counter, Mode, Hide, Show }
+    public const int PartCount = 19;
     public const float Pad = 8f, ButtonH = 28f, Gap = 4f, Margin = 4f, ThumbW = 12f;
     public const int FontSize = 14;
 
     // (part, width, space after) at scale 1
     static readonly (Part part, float width, float after)[] Row =
     {
-        (Part.ToStart, 44f, Gap), (Part.Rewind, 44f, Gap), (Part.StepBack, 44f, Gap), (Part.PlayPause, 60f, Gap),
-        (Part.StepForward, 44f, Gap), (Part.Replay, 44f, Gap), (Part.ToNewest, 44f, Gap + 8f),
-        (Part.Slider, 240f, 8f), (Part.Counter, 86f, 0f), (Part.Mode, 128f, Gap), (Part.Hide, 50f, 0f),
+        (Part.ToStart, 40f, Gap), (Part.Rewind, 40f, Gap), (Part.PrevEstimate, 40f, Gap + 4f),
+        (Part.BackLong, 46f, Gap), (Part.BackMid, 52f, Gap), (Part.StepBack, 46f, Gap), (Part.PlayPause, 60f, Gap),
+        (Part.StepForward, 46f, Gap), (Part.FwdMid, 52f, Gap), (Part.FwdLong, 46f, Gap + 4f),
+        (Part.NextEstimate, 40f, Gap), (Part.Replay, 40f, Gap), (Part.ToNewest, 40f, Gap + 8f),
+        (Part.Slider, 220f, 8f), (Part.Counter, 80f, 0f), (Part.Mode, 128f, Gap), (Part.Hide, 50f, 0f),
     };
     const float ShowWidth = 50f;
 
@@ -77,21 +80,19 @@ public sealed class FvpBarLayout
         return Part.None;
     }
 
-    // The slider's thumb centre for a cursor in a history of `count` frames, and the frame a pointer x selects.
-    public float ThumbX(int cursor, int count)
+    // The slider's thumb centre for a place on the timeline (0 = oldest recorded instant, 1 = newest), and the place a pointer x selects.
+    public float ThumbX(float fraction)
     {
         Rect s = rect[(int)Part.Slider];
         float half = ThumbW * scale * 0.5f;
-        float t = count > 1 ? Mathf.Clamp01(cursor / (float)(count - 1)) : 0f;
-        return Mathf.Round(Mathf.Lerp(s.xMin + half, s.xMax - half, t));
+        return Mathf.Round(Mathf.Lerp(s.xMin + half, s.xMax - half, Mathf.Clamp01(fraction)));
     }
 
-    public int IndexAt(float x, int count)
+    public float FractionAt(float x)
     {
         Rect s = rect[(int)Part.Slider];
         float half = ThumbW * scale * 0.5f;
-        float t = Mathf.Clamp01(Mathf.InverseLerp(s.xMin + half, s.xMax - half, x));
-        return Mathf.Clamp(Mathf.RoundToInt(t * (count - 1)), 0, Mathf.Max(0, count - 1));
+        return Mathf.Clamp01(Mathf.InverseLerp(s.xMin + half, s.xMax - half, x));
     }
 }
 
@@ -100,11 +101,14 @@ public struct FvpBarView
 {
     public bool paused, synced;
     public int autoDir;                 // -1 rewinding, +1 replaying
-    public int cursor, count;
+    public int pos;                     // the thumb, 0..1000 along the timeline
+    public int behindCs;                // how far behind the newest instant, in hundredths of a second (0 = at it)
+    public bool usable, live;           // there is a timeline to move along / the scene is running
     public FvpBarLayout.Part hover, down;
 
     public bool Equals(in FvpBarView o) =>
-        paused == o.paused && synced == o.synced && autoDir == o.autoDir && cursor == o.cursor && count == o.count && hover == o.hover && down == o.down;
+        paused == o.paused && synced == o.synced && autoDir == o.autoDir && pos == o.pos && behindCs == o.behindCs && usable == o.usable && live == o.live &&
+        hover == o.hover && down == o.down;
 }
 
 // The transport bar of ONE display, drawn as uGUI. IMGUI only ever draws on Display 1, so the component makes one of these per
@@ -147,7 +151,7 @@ public sealed class FvpTransportBar
         fill = NewImage("Fill", strip.transform, FillColor);
         thumb = NewImage("Thumb", strip.transform, ThumbColor);
 
-        string[] names = { "", "|<", "<<", "<", "Pause", ">", ">>", ">|", "", "", "Mode", "Hide", "FVP" };
+        string[] names = { "", "|<", "<<", "<E", "-1s", "-10f", "-1f", "Pause", "+1f", "+10f", "+1s", "E>", ">>", ">|", "", "", "Mode", "Hide", "FVP" };
         for (int i = 1; i < FvpBarLayout.PartCount; i++)
         {
             var part = (FvpBarLayout.Part)i;
@@ -236,7 +240,7 @@ public sealed class FvpTransportBar
 
             string text = part == FvpBarLayout.Part.PlayPause ? (v.paused ? "Play" : "Pause")
                         : part == FvpBarLayout.Part.Mode ? (v.synced ? "Mode: synced" : "Mode: real-time")
-                        : part == FvpBarLayout.Part.Counter ? (v.count > 0 ? $"{v.cursor + 1} / {v.count}" : "-")
+                        : part == FvpBarLayout.Part.Counter ? CounterText(v)
                         : null;
             if (text != null && label[i].text != text) label[i].text = text;
         }
@@ -244,8 +248,8 @@ public sealed class FvpTransportBar
         Rect sl = lay.rect[(int)FvpBarLayout.Part.Slider];
         if (sl.width > 0f)
         {
-            bool usable = v.count > 1;
-            float x = lay.ThumbX(v.cursor, v.count);
+            bool usable = v.usable;
+            float x = lay.ThumbX(v.pos / 1000f);
             float tw = Mathf.Round(FvpBarLayout.ThumbW * lay.scale), th = Mathf.Round((FvpBarLayout.ButtonH - 6f) * lay.scale);
             thumb.enabled = usable;
             fill.enabled = usable;
@@ -255,6 +259,13 @@ public sealed class FvpTransportBar
             Color tcol = TrackColor; if (!usable) tcol.a *= 0.4f;
             if (track.color != tcol) track.color = tcol;
         }
+    }
+
+    static string CounterText(in FvpBarView v)
+    {
+        if (!v.usable) return "-";
+        if (v.live) return "live";
+        return v.behindCs <= 0 ? "newest" : "-" + (v.behindCs / 100f).ToString("0.00") + " s";
     }
 
     // The children hang off the strip, so rects in screen space are expressed relative to its corner.

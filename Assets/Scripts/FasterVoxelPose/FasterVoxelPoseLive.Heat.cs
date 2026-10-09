@@ -23,14 +23,9 @@ public partial class FasterVoxelPoseLive
     // what the next frame asks the server for
     int HeatRequest => showHeatmaps ? Mathf.Clamp(heatmapJoint, -1, FvpSkeleton.Count - 1) : -2;
 
-    Texture2D[] heatTex, heatImage;
-    Color32[] heatPixels;
-    float[] heatPeak = new float[FvpHeatData.MaxViews];
-    int heatTexW, heatTexH, heatImgW, heatImgH;
-    FvpFrame heatTexFrame, heatImageFrame;
+    readonly FvpHeatTextures heatTextures = new FvpHeatTextures();
     readonly FvpHeatData heatData = new FvpHeatData();
     int heatKey;
-    static Color32[] heatLut;
 
     public FvpHeatData HeatData => heatData;
 
@@ -76,108 +71,27 @@ public partial class FasterVoxelPoseLive
 
     // ---------------- textures ----------------
 
-    static void BuildLut()
-    {
-        // inferno-like: transparent where the network sees nothing, then purple, red, orange, yellow-white
-        (float t, Color32 c)[] stops =
-        {
-            (0.00f, new Color32(20, 0, 60, 0)), (0.10f, new Color32(70, 10, 120, 70)), (0.30f, new Color32(190, 40, 100, 165)),
-            (0.55f, new Color32(255, 130, 20, 210)), (0.80f, new Color32(255, 225, 70, 232)), (1.00f, new Color32(255, 255, 225, 245)),
-        };
-        heatLut = new Color32[256];
-        for (int i = 0; i < 256; i++)
-        {
-            float t = Mathf.Clamp01(i / 255f * 1.35f); // the maps peak at 0.4-0.8, so stretch them
-            int s = 0;
-            while (s < stops.Length - 2 && t > stops[s + 1].t) s++;
-            float k = Mathf.InverseLerp(stops[s].t, stops[s + 1].t, t);
-            heatLut[i] = Color32.Lerp(stops[s].c, stops[s + 1].c, k);
-        }
-    }
+    void FillHeatTexture(FvpFrame f) => heatTextures.FillHeat(f.heat, f.heatW, f.heatH, f);
 
-    void EnsureHeatTextures(int views, int w, int h)
-    {
-        if (heatLut == null) BuildLut();
-        if (heatTex != null && heatTex.Length == views && heatTexW == w && heatTexH == h) return;
-        DestroyHeatTextures();
-        heatTex = new Texture2D[views];
-        for (int v = 0; v < views; v++)
-            heatTex[v] = new Texture2D(w, h, TextureFormat.RGBA32, false) { name = $"FVP heat {v}", filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp, hideFlags = HideFlags.HideAndDontSave };
-        heatPixels = new Color32[w * h];
-        heatTexW = w; heatTexH = h;
-    }
-
-    void FillHeatTexture(FvpFrame f)
-    {
-        EnsureHeatTextures(f.heat.Length, f.heatW, f.heatH);
-        for (int v = 0; v < f.heat.Length; v++)
-        {
-            byte[] src = f.heat[v];
-            byte peak = 0;
-            for (int i = 0; i < src.Length; i++)
-            {
-                byte b = src[i];
-                if (b > peak) peak = b;
-                heatPixels[i] = heatLut[b];
-            }
-            heatTex[v].SetPixels32(heatPixels);
-            heatTex[v].Apply(false);
-            heatPeak[v] = peak / 255f;
-        }
-        heatTexFrame = f;
-    }
-
-    // The picture the maps belong to: exactly what was sent to the network (top row first, hence the flipped uvRect on the tile).
+    // The picture the maps belong to: exactly what was sent to the network.
     void UploadHeatImage(FvpFrame f)
     {
-        if (f.raw == null || f.raw.Length != f.heat.Length) return;
-        if (heatImage == null || heatImage.Length != f.raw.Length || heatImgW != f.width || heatImgH != f.height)
-        {
-            DestroyHeatImages();
-            heatImage = new Texture2D[f.raw.Length];
-            for (int v = 0; v < heatImage.Length; v++)
-                heatImage[v] = new Texture2D(f.width, f.height, TextureFormat.RGB24, false) { name = $"FVP heat image {v}", filterMode = FilterMode.Bilinear, hideFlags = HideFlags.HideAndDontSave };
-            heatImgW = f.width; heatImgH = f.height;
-        }
-        for (int v = 0; v < f.raw.Length; v++)
-        {
-            byte[] raw = f.raw[v];
-            if (raw == null || raw.Length != f.width * f.height * 3) return;
-            heatImage[v].LoadRawTextureData(raw);
-            heatImage[v].Apply(false);
-        }
-        heatImageFrame = f;
+        if (f.raw != null && f.raw.Length == f.heat.Length) heatTextures.UploadImage(f.raw, f.width, f.height, f);
     }
 
-    void DestroyHeatTextures()
-    {
-        if (heatTex != null) foreach (Texture2D t in heatTex) if (t != null) Destroy(t);
-        heatTex = null; heatTexFrame = null;
-    }
-
-    void DestroyHeatImages()
-    {
-        if (heatImage != null) foreach (Texture2D t in heatImage) if (t != null) Destroy(t);
-        heatImage = null; heatImageFrame = null;
-    }
-
-    void DestroyHeat()
-    {
-        DestroyHeatTextures();
-        DestroyHeatImages();
-    }
+    void DestroyHeat() => heatTextures.DestroyAll();
 
     // ---------------- what the panels show ----------------
 
     // Every frame, cheap: only rebuilds when the frame on show, the joint or the settings changed.
     void RefreshHeat()
     {
-        heatData.visible = showHeatmaps;
+        heatData.visible = showHeatmaps && PanelsVisible;
         if (!showHeatmaps) return;
 
         FvpFrame f = IsReady ? displayed : null;
-        if (f != null && f.heat != null && heatTexFrame != f) FillHeatTexture(f);   // browsing the history
-        bool imageOk = f != null && f == heatImageFrame;
+        if (f != null && f.heat != null && heatTextures.heatOwner != f) FillHeatTexture(f);   // browsing the history
+        bool imageOk = f != null && f == heatTextures.imageOwner;
 
         int key = f == null ? 0 : f.id * 31 + (f.heat != null ? 1 : 2) + (imageOk ? 4 : 0) + (heatmapJoint + 2) * 97 + (paused ? 8 : 0);
         key ^= (cameras != null ? cameras.Count : 0) << 20;
@@ -189,7 +103,8 @@ public partial class FasterVoxelPoseLive
         if (f.heat == null)
         {
             heatData.views = 0;
-            heatData.message = f.estimated && f.id > 0 ? "No 2D heatmap for this frame (older than the kept window, or the server needs a restart)." : "";
+            heatData.message = f.placeholder ? "No estimate for this frame yet: its 2D maps come with it."
+                             : f.estimated && f.id > 0 ? "No 2D heatmap for this frame (older than the kept window, or the server needs a restart)." : "";
             heatData.hint = "";
             return;
         }
@@ -201,12 +116,12 @@ public partial class FasterVoxelPoseLive
         {
             Camera cam = cameras != null && v < cameras.Count ? cameras[v] : null;
             heatData.display[v] = cam != null ? cam.targetDisplay : -1;
-            heatData.heat[v] = heatTex != null && v < heatTex.Length ? heatTex[v] : null;
-            heatData.image[v] = imageOk && heatImage != null && v < heatImage.Length ? heatImage[v] : null;
-            heatData.label[v] = $"{(cam != null ? cam.name.Trim() : "view " + v)}  ·  {JointLabel(f.heatJoint)}  ·  peak {heatPeak[v]:F2}";
+            heatData.heat[v] = heatTextures.heat != null && v < heatTextures.heat.Length ? heatTextures.heat[v] : null;
+            heatData.image[v] = imageOk && heatTextures.image != null && v < heatTextures.image.Length ? heatTextures.image[v] : null;
+            heatData.label[v] = $"{(cam != null ? cam.name.Trim() : "view " + v)}  ·  {JointLabel(f.heatJoint)}  ·  peak {heatTextures.peak[v]:F2}";
         }
         heatData.message = "";
-        heatData.hint = "2D network output, the only thing the 3D stage sees." + (imageOk ? "" : "\n(image kept for the newest estimate only)") +
-                        "\nJ / Shift+J joint   G hide" + (f.heatJoint != HeatRequest ? "   (change applies to the next estimate)" : "");
+        heatData.hint = "2D network output: all the 3D stage sees." + (imageOk ? "" : "\n(image kept for the newest estimate only)") +
+                        "\nJ / Shift+J joint   G hide" + (f.heatJoint != HeatRequest ? "\n(a change applies to the next estimate)" : "");
     }
 }

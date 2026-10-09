@@ -44,24 +44,32 @@ public class FasterVoxelPoseLiveEditor : Editor
         string state = t.IsPaused ? (t.Rewinding < 0 ? "REWIND" : t.Rewinding > 0 ? "REPLAY" : "PAUSED") : "LIVE";
         var people = t.People;
         EditorGUILayout.HelpBox($"{state} - {t.Status}\n" +
-                                $"{people.Count} person(s) on show   {t.EstimateFps:F1} estimates/s   history {t.HistoryCount} frames (cursor {t.Cursor + 1})",
+                                $"{people.Count} person(s) on show   {t.EstimateFps:F1} estimates/s   {t.HistoryCount} estimates, {t.MomentCount} frames recorded" +
+                                (t.HasTimeline && !t.IsLive ? $"   {t.SecondsBehind:F2} s behind the newest" : "") +
+                                (t.PhantomsHidden > 0 ? $"   {t.PhantomsHidden} phantoms hidden so far" : ""),
                                 t.IsReady ? MessageType.None : MessageType.Warning);
 
         using (new EditorGUILayout.HorizontalScope())
         {
             if (GUILayout.Button("|<")) t.GoToStart();
             if (GUILayout.Toggle(t.Rewinding < 0, "<<", "Button") != (t.Rewinding < 0)) t.ToggleRewind();
-            if (GUILayout.Button("<")) t.StepBackward();
+            if (GUILayout.Button("<E")) t.PreviousEstimate();
+            if (GUILayout.Button("-1s")) t.Jump(-1.0);
+            if (GUILayout.Button("-10f")) t.Jump(-10.0 * t.stepSeconds);
+            if (GUILayout.Button("-1f")) t.StepBackward();
             if (GUILayout.Button(t.IsPaused ? "Play" : "Pause", GUILayout.MinWidth(70))) t.TogglePause();
-            if (GUILayout.Button(">")) t.StepForward();
+            if (GUILayout.Button("+1f")) t.StepForward();
+            if (GUILayout.Button("+10f")) t.Jump(10.0 * t.stepSeconds);
+            if (GUILayout.Button("+1s")) t.Jump(1.0);
+            if (GUILayout.Button("E>")) t.NextEstimate();
             if (GUILayout.Toggle(t.Rewinding > 0, ">>", "Button") != (t.Rewinding > 0)) t.ToggleReplay();
             if (GUILayout.Button(">|")) t.GoToNewest();
         }
 
-        if (t.HistoryCount > 1)
+        if (t.HasTimeline && t.TimelineEnd - t.TimelineStart > 1e-6)
         {
-            int c = EditorGUILayout.IntSlider("Frame", t.Cursor + 1, 1, t.HistoryCount) - 1;
-            if (c != t.Cursor) t.Scrub(c);
+            float f = EditorGUILayout.Slider("Timeline", t.TimelineFraction, 0f, 1f);
+            if (Mathf.Abs(f - t.TimelineFraction) > 1e-4f) t.ScrubToFraction(f);
         }
         EditorGUILayout.Space();
     }

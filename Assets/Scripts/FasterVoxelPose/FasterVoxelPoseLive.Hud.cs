@@ -52,8 +52,9 @@ public partial class FasterVoxelPoseLive
         {
             fvpMsPerFrame = windowFrames > 0 ? (float)TicksToMs(profFrame.ticks) / windowFrames : 0f;
             captureMsAverage = profCapture.calls > 0 ? (float)TicksToMs(profCapture.ticks) / profCapture.calls : captureMsAverage;
+            momentMsAverage = profMoment.calls > 0 ? (float)TicksToMs(profMoment.ticks) / profMoment.calls : momentMsAverage;
             worstFrameMs = windowMaxDt * 1000f;
-            profFrame = default; profCapture = default;
+            profFrame = default; profCapture = default; profMoment = default;
             windowFrames = 0; windowMaxDt = 0f; windowStart = now;
         }
     }
@@ -119,11 +120,29 @@ public partial class FasterVoxelPoseLive
         }
     }
 
+    // Where the transport is on the timeline, in words.
+    void AppendTimelineRow(StringBuilder sb, FvpFrame f)
+    {
+        if (!HasTimeline) { sb.Append('-'); return; }
+        if (IsLive) sb.Append("newest");
+        else sb.Append('-').Append(SecondsBehind.ToString("F2")).Append(" s");
+        sb.Append("   ·   t = ").Append(viewTime.ToString("F2")).Append(" s   ·   ");
+        if (f != null && f.placeholder)
+        {
+            int before = EstimateBefore;
+            if (before < 0) sb.Append("before the first estimate");
+            else if (before + 1 >= history.Count) sb.Append("after estimate ").Append(before + 1);
+            else sb.Append("between estimates ").Append(before + 1).Append(" and ").Append(before + 2);
+        }
+        else sb.Append("estimate ").Append(cursor + 1).Append(" of ").Append(history.Count);
+        sb.Append("   ·   ").Append(moments.Count).Append(" frames recorded");
+    }
+
     // A few times a second; the widget only re-lays itself out when the content really changed.
     void RefreshHud()
     {
-        hudData.visible = showHud;
-        if (!showHud) { hudData.stamp++; return; }
+        hudData.visible = showHud && PanelsVisible;
+        if (!hudData.visible) { hudData.stamp++; return; }
 
         float now = Time.unscaledTime;
         if (now < nextHudTime) return;
@@ -138,7 +157,9 @@ public partial class FasterVoxelPoseLive
         if (!IsReady) { state = "WAITING"; stateColor = new Color(0.7f, 0.75f, 0.8f); }
         else if (paused)
         {
-            state = autoDir < 0 ? "REWIND" : autoDir > 0 ? "REPLAY" : Estimating ? "PAUSED · estimating" : "PAUSED";
+            state = autoDir < 0 ? "REWIND" : autoDir > 0 ? "REPLAY"
+                  : ShowsMoment ? (Estimating || estimateDue > 0f ? "PAUSED · estimating this frame" : "PAUSED · no estimate for this frame")
+                  : Estimating ? "PAUSED · estimating" : "PAUSED";
             stateColor = new Color(1f, 0.82f, 0.45f);
         }
         else if (!followHead) { state = "BEHIND"; stateColor = new Color(1f, 0.82f, 0.45f); }
@@ -147,7 +168,8 @@ public partial class FasterVoxelPoseLive
         hudData.stateColor = stateColor;
 
         string mode = overlayImage == OverlayImage.SyncedFrame ? "synced frame" : latencyCompensation ? "real-time, estimate advanced" : "real-time";
-        hudData.legend = (showGroundTruth ? "<color=#7dff7d>■</color> ground truth    " : "") + (showEstimate ? "<color=#ff9a2e>■</color> estimate    " : "") +
+        hudData.legend = (showGroundTruth && GroundTruthVisible ? "<color=#7dff7d>■</color> ground truth    " : "") +
+                         (showEstimate && OverlayVisible ? "<color=#ff9a2e>■</color> estimate    " : "") +
                          "<color=#9aa7b5>" + mode + "</color>";
 
         hudLabels.Length = 0; hudValues.Length = 0; hudWarn.Length = 0;
@@ -163,12 +185,22 @@ public partial class FasterVoxelPoseLive
         else
         {
             float fps = smoothDt > 1e-4f ? 1f / smoothDt : 0f;
-            hudLabels.Append("estimates\nlatency\nUnity\nthis tool\nframe\nrender");
+            hudLabels.Append("estimates\nlatency\nserver\nUnity\nthis tool\ntimeline\nrender");
             hudValues.Append(estimateFps.ToString("F1")).Append(" /s\n");
-            hudValues.Append(f.latencyMs.ToString("F0")).Append(" ms from capture to answer   ·   server ").Append(f.totalMs.ToString("F0")).Append(" ms\n");
-            hudValues.Append(fps.ToString("F0")).Append(" fps  (").Append((smoothDt * 1000f).ToString("F0")).Append(" ms, worst ").Append(worstFrameMs.ToString("F0")).Append(")\n");
-            hudValues.Append(fvpMsPerFrame.ToString("F2")).Append(" ms per frame   ·   ").Append(captureMsAverage.ToString("F0")).Append(" ms per capture\n");
-            hudValues.Append(history.Count > 0 ? (cursor + 1) + " / " + history.Count : "-").Append("   ·   t = ").Append(f.sceneTime.ToString("F2")).Append(" s\n");
+            hudValues.Append(f.latencyMs.ToString("F0")).Append(" ms from capture to answer\n");
+            hudValues.Append(f.totalMs.ToString("F0")).Append(" ms");
+            if (f.backboneMs > 0f)
+                hudValues.Append("  =  backbone ").Append(f.backboneMs.ToString("F0")).Append(" + root ").Append(f.rootMs.ToString("F0")).Append(" + joints ").Append(f.jointMs.ToString("F0"))
+                         .Append("  (").Append(f.proposals).Append(f.proposals == 1 ? " person" : " people").Append(" localised)");
+            hudValues.Append('\n');
+            hudValues.Append(fps.ToString("F0")).Append(" fps  (").Append((smoothDt * 1000f).ToString("F0")).Append(" ms, worst ").Append(worstFrameMs.ToString("F0")).Append(")");
+            if (appliedRate > 0) hudValues.Append("  ·  held to ").Append(appliedRate).Append(" fps to leave the GPU to the models");
+            hudValues.Append('\n');
+            hudValues.Append(fvpMsPerFrame.ToString("F2")).Append(" ms per frame   ·   ").Append(captureMsAverage.ToString("F0")).Append(" ms per capture");
+            if (momentMsAverage > 0f) hudValues.Append("   ·   ").Append(momentMsAverage.ToString("F2")).Append(" ms per recorded frame");
+            hudValues.Append('\n');
+            AppendTimelineRow(hudValues, f);
+            hudValues.Append('\n');
             // The size Unity renders this display at: if it is smaller than the window shows it in, the Game view is magnifying it.
             hudValues.Append(Screen.width).Append(" × ").Append(Screen.height).Append(" px");
 
@@ -179,11 +211,14 @@ public partial class FasterVoxelPoseLive
                 hudData.people.Add(new FvpHudData.PersonRow
                 {
                     id = p.id, score = p.score, errMm = p.errMm, ghost = p.ghost, color = new Color(1f, 0.6f, 0.18f),
+                    detail = p.phantom ? $"{p.score:F2}   <color=#ff7a6b>phantom? 2D support {p.meanSupport:F2}</color>" : null,
                 });
             }
+            hudData.emptyText = f.placeholder ? "no estimate for this frame yet (the faint skeleton is the nearest one)" : "nobody found";
+            AppendPhantomLine(hudWarn, f);
 
             if (smoothDt > 0.045f)
-                hudWarn.Append("Unity runs at ").Append(fps.ToString("F0")).Append(" fps: an estimate shows up at least\n2 frames (")
+                hudWarn.Append(hudWarn.Length > 0 ? "\n" : "").Append("Unity runs at ").Append(fps.ToString("F0")).Append(" fps: an estimate shows up at least\n2 frames (")
                        .Append((2f * smoothDt * 1000f).ToString("F0")).Append(" ms) after it was captured.");
             int rendering = Camera.allCamerasCount;
             if (rendering > cameras.Count + 3)

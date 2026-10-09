@@ -12,6 +12,8 @@ public sealed class FvpHudData
         public float errMm;       // mean joint distance to the ground truth at the same instant; < 0 = none to compare with
         public bool ghost;        // there is ground truth, but nobody within a metre of this skeleton
         public Color color;
+        public string label;      // replaces "#id" (another model's rows are not people with an id)
+        public string detail;     // replaces the text after the score bar ("0.16   err 118 mm")
     }
 
     public bool visible = true;
@@ -23,6 +25,7 @@ public sealed class FvpHudData
     public string footer = "";
     public float minScore = 0.1f;
     public float scoreFullScale = 0.5f;
+    public string emptyText = "nobody found";   // shown when there is no row
     public readonly List<PersonRow> people = new List<PersonRow>();
     public int stamp;             // bumped by the builder whenever anything above changed
 }
@@ -42,7 +45,7 @@ public sealed class FvpHud
     readonly Row[] rows = new Row[MaxRows];
     int appliedStamp = -1;
     float appliedScale;
-    string appliedTitle;
+    string appliedTitle, appliedBrand;
 
     sealed class Row
     {
@@ -69,7 +72,7 @@ public sealed class FvpHud
         more = Label("More", p, TextAnchor.MiddleLeft, 12);
         labels.color = Dimmed; footer.color = new Color(0.58f, 0.63f, 0.7f); more.color = Dimmed;
         warn.color = new Color(1f, 0.72f, 0.3f);
-        warn.horizontalOverflow = footer.horizontalOverflow = HorizontalWrapMode.Overflow;
+        warn.horizontalOverflow = footer.horizontalOverflow = HorizontalWrapMode.Wrap;
 
         for (int i = 0; i < MaxRows; i++)
         {
@@ -134,43 +137,63 @@ public sealed class FvpHud
     static void SetText(Text t, string s) { if (t.text != s) t.text = s; }
 
     // `cameras`: what this display shows (the title). `u`: the UI scale (fonts are whole pixel sizes, edges whole pixels).
-    public void Apply(FvpHudData d, string cameras, float u)
+    public void Apply(FvpHudData d, string cameras, float u, string brand = "FVP")
     {
         if (!d.visible) { if (panel.gameObject.activeSelf) panel.gameObject.SetActive(false); return; }
         if (!panel.gameObject.activeSelf) { panel.gameObject.SetActive(true); appliedStamp = -1; }
-        if (appliedStamp == d.stamp && appliedScale == u && appliedTitle == cameras) return;
-        appliedStamp = d.stamp; appliedScale = u; appliedTitle = cameras;
+        if (appliedStamp == d.stamp && appliedScale == u && appliedTitle == cameras && appliedBrand == brand) return;
+        appliedStamp = d.stamp; appliedScale = u; appliedTitle = cameras; appliedBrand = brand;
 
-        float pad = 10f * u, margin = 10f * u, w = 340f * u, lh = Mathf.Round(20f * u);
-        float inner = w - 2f * pad;
+        float pad = 10f * u, margin = 10f * u, lh = Mathf.Round(20f * u);
         int f13 = Mathf.RoundToInt(13f * u), f12 = Mathf.RoundToInt(12f * u), f11 = Mathf.RoundToInt(11f * u), f14 = Mathf.RoundToInt(14f * u);
         SetSize(title, f14); SetSize(state, f13); SetSize(legend, f12); SetSize(labels, f12); SetSize(values, f12);
         SetSize(warn, f12); SetSize(footer, f11); SetSize(more, f12);
 
-        float y = pad;
-
-        SetText(title, string.IsNullOrEmpty(cameras) ? "FVP" : "FVP  ·  " + ShortTitle(cameras));
-        Put(title, pad, y, inner * 0.6f, lh);
+        // ---- measure: the card is as wide as its widest line (at least 340, at most 720 at scale 1), the long notes wrap
+        SetText(title, string.IsNullOrEmpty(cameras) ? brand : brand + "  ·  " + ShortTitle(cameras));
         SetText(state, d.state);
+        SetText(legend, d.legend);
+        SetText(labels, d.statLabels);
+        SetText(values, d.statValues);
+        float labelW = 74f * u;
+        bool labelled = false;
+        for (int i = 0; i < d.people.Count; i++) if (d.people[i].label != null) labelled = true;
+        float trackW = 104f * u, idW = (labelled ? 74f : 30f) * u, rowH = Mathf.Round(20f * u), sw = Mathf.Round(8f * u), sh = Mathf.Round(14f * u);
+        float tx = pad + sw + 6f * u + idW;
+        float valueX = tx + trackW + 8f * u;
+        int shown = Mathf.Min(MaxRows, d.people.Count);
+
+        float need = Mathf.Max(2f * pad + labelW + Mathf.Ceil(values.preferredWidth), 2f * pad + Mathf.Ceil(legend.preferredWidth));
+        for (int i = 0; i < shown; i++)
+        {
+            Row r = rows[i];
+            FvpHudData.PersonRow p = d.people[i];
+            SetSize(r.id, f13); SetSize(r.value, f12);
+            SetText(r.id, p.label ?? "#" + p.id);
+            string err = p.ghost ? "<color=#ff7a6b>nobody there?</color>"
+                       : p.errMm >= 0f ? $"<color={ErrColor(p.errMm)}>err {p.errMm:F0} mm</color>"
+                       : "<color=#8a95a3>no ground truth</color>";
+            SetText(r.value, p.detail ?? $"{p.score:F2}   {err}");
+            need = Mathf.Max(need, valueX + Mathf.Ceil(r.value.preferredWidth) + pad);
+        }
+        float w = Mathf.Round(Mathf.Clamp(need, 340f * u, 720f * u));
+        float inner = w - 2f * pad;
+
+        // ---- lay out
+        float y = pad;
+        Put(title, pad, y, inner * 0.6f, lh);
         state.color = d.stateColor;
         Put(state, pad + inner * 0.6f, y, inner * 0.4f, lh);
         y += lh;
 
-        SetText(legend, d.legend);
         Put(legend, pad, y, inner, lh);
         y += lh + 4f * u;
 
-        SetText(labels, d.statLabels);
-        SetText(values, d.statValues);
-        float labelW = 74f * u;
         float statH = Mathf.Ceil(Mathf.Max(labels.preferredHeight, values.preferredHeight));
         Put(labels, pad, y, labelW, statH);
         Put(values, pad + labelW, y, inner - labelW, statH);
         y += statH + 6f * u;
 
-        // people
-        float trackW = 104f * u, idW = 30f * u, rowH = Mathf.Round(20f * u);
-        int shown = Mathf.Min(MaxRows, d.people.Count);
         for (int i = 0; i < MaxRows; i++)
         {
             Row r = rows[i];
@@ -178,14 +201,11 @@ public sealed class FvpHud
             if (i >= shown) continue;
             FvpHudData.PersonRow p = d.people[i];
 
-            float sw = Mathf.Round(8f * u), sh = Mathf.Round(14f * u);
             r.swatch.color = p.color;
             Put(r.swatch, pad, y + (rowH - sh) * 0.5f, sw, sh);
-            SetSize(r.id, f13);
-            SetText(r.id, "#" + p.id);
             Put(r.id, pad + sw + 6f * u, y, idW, rowH);
 
-            float tx = pad + sw + 6f * u + idW, th = Mathf.Round(6f * u / 2f) * 2f;
+            float th = Mathf.Round(6f * u / 2f) * 2f;
             float ty = y + (rowH - th) * 0.5f;
             Put(r.track, tx, ty, trackW, th);
             float frac = Mathf.Clamp01(p.score / Mathf.Max(1e-3f, d.scoreFullScale));
@@ -193,17 +213,12 @@ public sealed class FvpHud
             float tickH = Mathf.Round(12f * u);
             Put(r.tick, tx + trackW * Mathf.Clamp01(d.minScore / Mathf.Max(1e-3f, d.scoreFullScale)), y + (rowH - tickH) * 0.5f, Mathf.Max(1f, Mathf.Round(u)), tickH);
 
-            SetSize(r.value, f12);
-            string err = p.ghost ? "<color=#ff7a6b>nobody there?</color>"
-                       : p.errMm >= 0f ? $"<color={ErrColor(p.errMm)}>err {p.errMm:F0} mm</color>"
-                       : "<color=#8a95a3>no ground truth</color>";
-            SetText(r.value, $"{p.score:F2}   {err}");
-            Put(r.value, tx + trackW + 8f * u, y, inner - (tx - pad) - trackW - 8f * u, rowH);
+            Put(r.value, valueX, y, w - valueX - pad, rowH);
             y += rowH;
         }
         if (d.people.Count == 0)
         {
-            SetText(more, "nobody found");
+            SetText(more, string.IsNullOrEmpty(d.emptyText) ? "nobody found" : d.emptyText);
             Put(more, pad, y, inner, rowH);
             more.gameObject.SetActive(true);
             y += rowH;
@@ -217,12 +232,14 @@ public sealed class FvpHud
         }
         else more.gameObject.SetActive(false);
 
+        // the notes wrap at the card's width: the width is set before the height is read
         bool hasWarn = !string.IsNullOrEmpty(d.warn);
         warn.gameObject.SetActive(hasWarn);
         if (hasWarn)
         {
             y += 4f * u;
             SetText(warn, d.warn);
+            Put(warn, pad, y, inner, lh);
             float wh = Mathf.Ceil(warn.preferredHeight);
             Put(warn, pad, y, inner, wh);
             y += wh;
@@ -234,6 +251,7 @@ public sealed class FvpHud
         {
             y += 6f * u;
             SetText(footer, d.footer);
+            Put(footer, pad, y, inner, lh);
             float fh = Mathf.Ceil(footer.preferredHeight);
             Put(footer, pad, y, inner, fh);
             y += fh;

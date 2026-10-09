@@ -6,6 +6,8 @@ using UnityEngine;
 public partial class FasterVoxelPoseLive
 {
     const int BarDisplays = 8; // Unity's maximum
+    const double LongJumpSeconds = 1.0;
+    const int MidJumpFrames = 10;
 
     FvpTransportBar[] bars;
     readonly FvpBarLayout barLayout = new FvpBarLayout();
@@ -26,10 +28,13 @@ public partial class FasterVoxelPoseLive
             for (int d = 0; d < bars.Length; d++) bars[d] = new FvpTransportBar(d);
         }
         EnsureBarLayout();
+        bool timeline = HasTimeline && TimelineEnd - TimelineStart > 1e-6;
         var view = new FvpBarView
         {
             paused = paused, synced = overlayImage == OverlayImage.SyncedFrame, autoDir = autoDir,
-            cursor = cursor, count = history.Count, hover = barHover, down = barDown,
+            pos = timeline ? Mathf.RoundToInt(TimelineFraction * 1000f) : 0,
+            behindCs = timeline ? Mathf.RoundToInt((float)SecondsBehind * 100f) : 0,
+            usable = timeline, live = IsLive, hover = barHover, down = barDown,
         };
         foreach (FvpTransportBar b in bars)
         {
@@ -71,7 +76,7 @@ public partial class FasterVoxelPoseLive
 
     void ScrubTo(Vector2 pos)
     {
-        if (history.Count > 1) Scrub(barLayout.IndexAt(pos.x, history.Count));
+        if (HasTimeline) ScrubToFraction(barLayout.FractionAt(pos.x));
     }
 
     void Activate(FvpBarLayout.Part part)
@@ -80,9 +85,15 @@ public partial class FasterVoxelPoseLive
         {
             case FvpBarLayout.Part.ToStart: GoToStart(); break;
             case FvpBarLayout.Part.Rewind: ToggleRewind(); break;
+            case FvpBarLayout.Part.PrevEstimate: PreviousEstimate(); break;
+            case FvpBarLayout.Part.BackLong: Jump(-LongJumpSeconds); break;
+            case FvpBarLayout.Part.BackMid: Jump(-MidJumpFrames * stepSeconds); break;
             case FvpBarLayout.Part.StepBack: StepBackward(); break;
             case FvpBarLayout.Part.PlayPause: TogglePause(); break;
             case FvpBarLayout.Part.StepForward: StepForward(); break;
+            case FvpBarLayout.Part.FwdMid: Jump(MidJumpFrames * stepSeconds); break;
+            case FvpBarLayout.Part.FwdLong: Jump(LongJumpSeconds); break;
+            case FvpBarLayout.Part.NextEstimate: NextEstimate(); break;
             case FvpBarLayout.Part.Replay: ToggleReplay(); break;
             case FvpBarLayout.Part.ToNewest: GoToNewest(); break;
             case FvpBarLayout.Part.Mode:

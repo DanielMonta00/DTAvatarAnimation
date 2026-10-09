@@ -23,6 +23,7 @@ public sealed class FvpOverlayGraphic : MaskableGraphic
     public float dotRadius = 4f;      // pixels at referenceWidth
     public float minLineWidth = 1.5f; // never thinner than this on screen
     public float minDotRadius = 2.5f;
+    public float alpha = 1f;          // multiplies the alpha of everything added from now on (a stale estimate is drawn dim)
 
     public int LineCount => lines.Count;
     public int DotCount => dots.Count;
@@ -37,18 +38,21 @@ public sealed class FvpOverlayGraphic : MaskableGraphic
 
     public void Begin()
     {
+        alpha = 1f;
         lines.Clear(); dots.Clear();
         hash = 17;
     }
 
     public void AddLine(Vector2 a, Vector2 b, Color c)
     {
+        c.a *= alpha;
         lines.Add(new Line { a = a, b = b, c = c });
         hash = Mix(hash, a, b, c);
     }
 
     public void AddDot(Vector2 p, Color c)
     {
+        c.a *= alpha;
         dots.Add(new Dot { p = p, c = c });
         hash = Mix(hash, p, p, c);
     }
@@ -71,7 +75,7 @@ public sealed class FvpOverlayGraphic : MaskableGraphic
             h = h * 31 + Mathf.RoundToInt(a.y * 4096f);
             h = h * 31 + Mathf.RoundToInt(b.x * 4096f);
             h = h * 31 + Mathf.RoundToInt(b.y * 4096f);
-            h = h * 31 + Mathf.RoundToInt((c.r + 2f * c.g + 4f * c.b) * 64f);
+            h = h * 31 + Mathf.RoundToInt((c.r + 2f * c.g + 4f * c.b + 8f * c.a) * 64f);
             return h;
         }
     }

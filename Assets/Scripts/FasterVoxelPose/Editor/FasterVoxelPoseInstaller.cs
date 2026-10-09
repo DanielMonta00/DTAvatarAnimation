@@ -56,6 +56,55 @@ public static class FasterVoxelPoseInstaller
                   "  Press Play. The first run loads the model (~10 s); the skeletons appear over each camera's display.", go);
     }
 
+    public const string ModelsParentName = "EstimationModels", ViTPoseObjectName = "ViTPose";
+
+    [MenuItem("Tools/FasterVoxelPose/Add ViTPose + models hub (under 'EstimationModels')")]
+    public static void InstallModels()
+    {
+        Scene scene = SceneManager.GetActiveScene();
+
+        // the parent: each child object is another model running on the cameras
+        GameObject parent = FindObject(scene, ModelsParentName);
+        bool createdParent = parent == null;
+        if (createdParent)
+        {
+            parent = new GameObject(ModelsParentName);
+            Undo.RegisterCreatedObjectUndo(parent, "Create " + ModelsParentName);
+        }
+
+        // FasterVoxelPose goes under it (made first if there is none yet)
+        GameObject fvpGo = FindObject(scene, ObjectName);
+        if (fvpGo == null || fvpGo.GetComponent<FasterVoxelPoseLive>() == null) { Install(); fvpGo = FindObject(scene, ObjectName); }
+        if (fvpGo != null && fvpGo.transform.parent != parent.transform)
+            Undo.SetTransformParent(fvpGo.transform, parent.transform, "Move FasterVoxelPose under " + ModelsParentName);
+
+        var hub = parent.GetComponent<EstimationModelsHub>();
+        if (hub == null) hub = Undo.AddComponent<EstimationModelsHub>(parent);
+
+        // ViTPose, a child of its own
+        Transform vitT = parent.transform.Find(ViTPoseObjectName);
+        GameObject vitGo = vitT != null ? vitT.gameObject : null;
+        bool createdVit = vitGo == null;
+        if (createdVit)
+        {
+            vitGo = new GameObject(ViTPoseObjectName);
+            Undo.RegisterCreatedObjectUndo(vitGo, "Create " + ViTPoseObjectName);
+            vitGo.transform.SetParent(parent.transform, false);
+        }
+        var vit = vitGo.GetComponent<ViTPoseLive>();
+        if (vit == null) vit = Undo.AddComponent<ViTPoseLive>(vitGo);
+
+        EditorUtility.SetDirty(hub);
+        EditorUtility.SetDirty(vit);
+        EditorSceneManager.MarkSceneDirty(scene);
+        Selection.activeGameObject = parent;
+
+        Debug.Log($"[FasterVoxelPose] {(createdParent ? "Created" : "Found")} '{ModelsParentName}' with the hub; models under it: " +
+                  string.Join(", ", parent.GetComponentsInChildren<IEstimationModel>(true).Select(m => m.ModelName)) + ".\n" +
+                  $"  ViTPose server: {vit.pythonExe}\n  ViTPose repo: {vit.vitposeRepo}\n  YOLO weights: {vit.yoloWeights}\n" +
+                  "  Press Play: both servers start with the editor, a tab per model appears on every display (T cycles, click a tab to select, click its swatch to hide its skeletons).", parent);
+    }
+
     static string Describe(Camera c) => c == null ? "(missing)" : $"{c.name.Trim()} [{HierarchyPath(c.transform)}]";
 
     static string HierarchyPath(Transform t)
@@ -91,9 +140,18 @@ public static class FasterVoxelPoseInstaller
     [MenuItem("Tools/FasterVoxelPose/Stop inference server")]
     public static void StopServer()
     {
-        bool was = FvpServerProcess.IsRunning;
-        FvpServerProcess.Stop();
-        Debug.Log(was ? "[FasterVoxelPose] server stopped." : "[FasterVoxelPose] no server of this editor session is running.");
+        bool any = false;
+        foreach (string n in FvpServerProcess.AllNames) any |= FvpServerProcess.IsRunningOf(n);
+        FvpServerProcess.StopAll();
+        Debug.Log(any ? "[FasterVoxelPose] inference servers stopped (Faster-VoxelPose and ViTPose); they start again by themselves in Play." : "[FasterVoxelPose] no server of this editor session is running.");
+    }
+
+    [MenuItem("Tools/FasterVoxelPose/Open ViTPose server log")]
+    public static void OpenViTPoseLog()
+    {
+        string p = FvpServerProcess.LogPathOf(FvpServerProcess.ViTPoseName);
+        if (!File.Exists(p)) { Debug.Log("[FasterVoxelPose] no ViTPose server log yet: " + p); return; }
+        Process.Start(new ProcessStartInfo(p) { UseShellExecute = true });
     }
 
     [MenuItem("Tools/FasterVoxelPose/Open server log")]
@@ -126,7 +184,7 @@ static class FasterVoxelPoseEditorHooks
         EditorApplication.delayCall += () => EnsureServer("the editor opened");
     }
 
-    static void OnQuit() => FvpServerProcess.Stop();
+    static void OnQuit() => FvpServerProcess.StopAll();
 
     static void OnPlayMode(PlayModeStateChange change)
     {
@@ -136,14 +194,24 @@ static class FasterVoxelPoseEditorHooks
     static void EnsureServer(string why)
     {
         FasterVoxelPoseLive c = UnityEngine.Object.FindFirstObjectByType<FasterVoxelPoseLive>(FindObjectsInactive.Include);
-        if (c == null || !c.enabled || !c.autoLaunchServer || !c.startServerWithEditor) return;
-        if (FvpServerProcess.IsRunning || PortOpen(c.host, c.port)) return;
+        if (c != null && c.enabled && c.autoLaunchServer && c.startServerWithEditor && !FvpServerProcess.IsRunning && !PortOpen(c.host, c.port))
+        {
+            string script = string.IsNullOrWhiteSpace(c.serverScript) ? FvpServerProcess.DefaultScriptPath : c.serverScript;
+            if (FvpServerProcess.TryLaunch(c.pythonExe, script, c.fvpRepo, c.host, c.port, c.EffectiveIdleExitSeconds, c.ServerArguments, out string err))
+                Debug.Log($"[FasterVoxelPose] server started ({why}) so that Play finds it ready.");
+            else
+                Debug.LogWarning("[FasterVoxelPose] could not start the server: " + err);
+        }
 
-        string script = string.IsNullOrWhiteSpace(c.serverScript) ? FvpServerProcess.DefaultScriptPath : c.serverScript;
-        if (FvpServerProcess.TryLaunch(c.pythonExe, script, c.fvpRepo, c.host, c.port, c.EffectiveIdleExitSeconds, c.ServerArguments, out string err))
-            Debug.Log($"[FasterVoxelPose] server started ({why}) so that Play finds it ready.");
-        else
-            Debug.LogWarning("[FasterVoxelPose] could not start the server: " + err);
+        ViTPoseLive v = UnityEngine.Object.FindFirstObjectByType<ViTPoseLive>(FindObjectsInactive.Include);
+        if (v != null && v.enabled && v.autoLaunchServer && v.startServerWithEditor && !FvpServerProcess.IsRunningOf(FvpServerProcess.ViTPoseName) && !PortOpen(v.host, v.port))
+        {
+            if (FvpServerProcess.Launch(FvpServerProcess.ViTPoseName, v.pythonExe, v.ServerScript, "--vitpose-dir \"" + v.vitposeRepo + "\" --yolo \"" + v.yoloWeights + "\"",
+                                        v.host, v.port, v.EffectiveIdleExitSeconds, v.ExtraLaunchArguments, out string err))
+                Debug.Log($"[ViTPose] server started ({why}) so that Play finds it ready.");
+            else
+                Debug.LogWarning("[ViTPose] could not start the server: " + err);
+        }
     }
 
     // Something (a server of an earlier editor session, one started by hand) already answers on the port.

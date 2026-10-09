@@ -47,6 +47,7 @@ public sealed class FvpHeatPanel
         panel = NewImage("Heatmaps", canvasRoot, new Color(0f, 0f, 0f, 0f));
         hint = FvpOverlay.NewText("Hint", panel.transform, TextAnchor.UpperLeft, 11, shadow: false);
         message = FvpOverlay.NewText("Message", panel.transform, TextAnchor.UpperLeft, 12, shadow: false);
+        hint.horizontalOverflow = message.horizontalOverflow = HorizontalWrapMode.Wrap;
         hint.color = new Color(0.72f, 0.77f, 0.83f);
         message.color = new Color(1f, 0.72f, 0.3f);
         for (int i = 0; i < tiles.Length; i++)
@@ -135,6 +136,7 @@ public sealed class FvpHeatPanel
         {
             if (message.fontSize != f12) message.fontSize = f12;
             message.text = d.message;
+            Put(message.rectTransform, 0f, y, tileW, 20f * u);
             float mh = Mathf.Ceil(message.preferredHeight);
             Put(message.rectTransform, 0f, y, tileW, mh);
             y += mh + 4f * u;
@@ -146,6 +148,7 @@ public sealed class FvpHeatPanel
         {
             if (hint.fontSize != f11) hint.fontSize = f11;
             hint.text = d.hint;
+            Put(hint.rectTransform, 0f, y, tileW, 20f * u);
             float hh = Mathf.Ceil(hint.preferredHeight);
             Put(hint.rectTransform, 0f, y, tileW, hh);
             y += hh;

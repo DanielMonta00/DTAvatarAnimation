@@ -77,11 +77,62 @@ public sealed class FvpCameraModel
         double r2 = xn * xn + yn * yn;
         if (maxRadius > 0 && r2 > maxRadius * maxRadius) return false;
 
-        double radial = 1.0 + r2 * (k1 + r2 * (k2 + r2 * k3));
-        double xd = xn * radial + 2.0 * p1 * xn * yn + p2 * (r2 + 2.0 * xn * xn);
-        double yd = yn * radial + p1 * (r2 + 2.0 * yn * yn) + 2.0 * p2 * xn * yn;
+        Distort(xn, yn, out double xd, out double yd);
         u = fx * xd + cx;
         v = fy * yd + cy;
+        return true;
+    }
+
+    // The OpenCV lens model: normalized undistorted coordinates -> normalized distorted ones.
+    void Distort(double xn, double yn, out double xd, out double yd)
+    {
+        double r2 = xn * xn + yn * yn;
+        double radial = 1.0 + r2 * (k1 + r2 * (k2 + r2 * k3));
+        xd = xn * radial + 2.0 * p1 * xn * yn + p2 * (r2 + 2.0 * xn * xn);
+        yd = yn * radial + p1 * (r2 + 2.0 * yn * yn) + 2.0 * p2 * xn * yn;
+    }
+
+    // The inverse of Project: the ray (origin = the camera centre, unit direction, both in the Unity world) through pixel (u, v)
+    // of the frame sent to the server, with the lens distortion taken out. The undistortion is a damped Newton solve of
+    // distort(p) = observed: the fixed-point iteration OpenCV's undistortPoints uses fails to converge where a barrel lens bends
+    // hard (k1 of -0.4 at the image corners). False when the pixel lies past the radius where the lens model holds, or no solution.
+    public bool TryRay(double u, double v, double[] origin, double[] dir)
+    {
+        double xd = (u - cx) / fx, yd = (v - cy) / fy;
+        double xn = xd, yn = yd;
+        bool lens = k1 != 0 || k2 != 0 || k3 != 0 || p1 != 0 || p2 != 0;
+        if (lens)
+        {
+            bool solved = false;
+            for (int it = 0; it < 60; it++)
+            {
+                Distort(xn, yn, out double fxn, out double fyn);
+                double ex = fxn - xd, ey = fyn - yd;
+                if (ex * ex + ey * ey < 1e-26) { solved = true; break; }
+                const double h = 1e-7;
+                Distort(xn + h, yn, out double ax, out double ay);
+                Distort(xn, yn + h, out double bx, out double by);
+                double j00 = (ax - fxn) / h, j10 = (ay - fyn) / h, j01 = (bx - fxn) / h, j11 = (by - fyn) / h;
+                double det = j00 * j11 - j01 * j10;
+                if (Math.Abs(det) < 1e-12) return false;
+                double dx = (j11 * ex - j01 * ey) / det, dy = (-j10 * ex + j00 * ey) / det;
+                double step = Math.Sqrt(dx * dx + dy * dy);
+                if (step > 0.3) { dx *= 0.3 / step; dy *= 0.3 / step; }       // damped: never jump across the fold of the polynomial
+                xn -= dx; yn -= dy;
+            }
+            if (!solved) return false;
+        }
+        if (maxRadius > 0 && xn * xn + yn * yn > maxRadius * maxRadius) return false;
+
+        // camera -> world is the transpose of rot (rows = right, -up, forward)
+        double len = Math.Sqrt(xn * xn + yn * yn + 1.0);
+        double cxn = xn / len, cyn = yn / len, czn = 1.0 / len;
+        dir[0] = rot[0] * cxn + rot[3] * cyn + rot[6] * czn;
+        dir[1] = rot[1] * cxn + rot[4] * cyn + rot[7] * czn;
+        dir[2] = rot[2] * cxn + rot[5] * cyn + rot[8] * czn;
+        double dl = Math.Sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);   // unit even when rot is only orthonormal to ~1e-6
+        dir[0] /= dl; dir[1] /= dl; dir[2] /= dl;
+        origin[0] = centre[0]; origin[1] = centre[1]; origin[2] = centre[2];
         return true;
     }
 

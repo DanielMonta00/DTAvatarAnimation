@@ -38,6 +38,7 @@ import numpy as np
 MAGIC = 0x31505646  # b'FVP1'
 HEADER = struct.Struct('<III')
 PROTOCOL = 1
+SERVER_VERSION = 2   # 2: 'support' (2D evidence per person and view) and the stage times in every result
 SEQ = 'unity'  # the model caches its sampling grids per sequence name; one config = one sequence
 
 
@@ -131,10 +132,16 @@ class Engine:
             torch.backends.cudnn.benchmark = (args.cudnn == 'on')
         log('[fvp] cudnn autotune %s' % ('on' if torch.backends.cudnn.benchmark else 'off'))
 
+        self.project_pose = cam_utils.project_pose
+        if not args.no_mask:
+            self.project_pose = self._masked_projection
         self.model = None
         self.config_id = None
         self.config_sig = None       # what the current head was built for (see same_config)
-        self.stats = []              # (pre ms, net ms, total ms) of the last frames, logged every STATS_EVERY
+        self.stats = []              # (pre ms, net ms, total ms, backbone, root, joint, proposals) of the last frames, logged every STATS_EVERY
+        self.stage = {}
+        self.last_proposals = 0
+        self.last_support = []
         self.last_heat = None
         self.cameras = None
         self.resize_transform = None
@@ -183,6 +190,7 @@ class Engine:
                 bad = bad | ((y ** 2).sum(0) > float(rmax) ** 2)
             return torch.where(bad.unsqueeze(1), torch.full_like(out, -1.0e4), out)
 
+        self._masked_projection = project_pose_masked
         project_whole.project_pose = project_pose_masked
         project_individual.project_pose = project_pose_masked
 
@@ -320,6 +328,8 @@ class Engine:
         model = self.models.faster_voxelpose.get(config)
         model.load_state_dict(self.head_state)
         self.model = model.to(self.device).eval()
+        self._time_stage(self.model.pose_net, 'root')      # finding the people (project the heatmaps into the volume, 3D CNNs)
+        self._time_stage(self.model.joint_net, 'joint')    # localising the joints of every person found
 
         self.view_count = len(cams)
         self.frame_size = (w, h)
@@ -347,7 +357,8 @@ class Engine:
     # One line every STATS_EVERY frames (and at the end of a session): what the server spends per frame. It tells a slow
     # network apart from a GPU that is busy with something else (Unity rendering): the same frames take ~50 ms alone.
     def record(self, pre, net, total):
-        self.stats.append((pre, net, total))
+        st = self.stage
+        self.stats.append((pre, net, total, st.get('backbone', 0.0), st.get('root', 0.0), st.get('joint', 0.0), self.last_proposals, st.get('support', 0.0)))
         if len(self.stats) >= self.STATS_EVERY:
             self.flush_stats()
 
@@ -356,8 +367,9 @@ class Engine:
             self.stats = []
             return
         a = np.array(self.stats)
-        log('[fvp] last %d frames: pre %.1f ms, net %.1f ms (max %.0f), total %.1f ms (p95 %.0f)' % (
-            len(a), a[:, 0].mean(), a[:, 1].mean(), a[:, 1].max(), a[:, 2].mean(), np.percentile(a[:, 2], 95)))
+        log('[fvp] last %d frames: pre %.1f ms, net %.1f ms (max %.0f), total %.1f ms (p95 %.0f)  |  backbone %.1f, root %.1f, joint %.1f, support %.1f ms, %.1f people kept' % (
+            len(a), a[:, 0].mean(), a[:, 1].mean(), a[:, 1].max(), a[:, 2].mean(), np.percentile(a[:, 2], 95),
+            a[:, 3].mean(), a[:, 4].mean(), a[:, 5].mean(), a[:, 7].mean(), a[:, 6].mean()))
         self.stats = []
 
     def _preprocess(self, views):
@@ -402,6 +414,54 @@ class Engine:
         frame_to_out = np.array([[1 / fx, 0, -(fx - 1) / (2 * fx)], [0, 1 / fy, -(fy - 1) / (2 * fy)], [0, 0, 1]])
         return (frame_to_out @ net_to_frame @ heat_to_net)[:2]
 
+    # 2D evidence for every person found: how strongly each view's own 2D heatmaps back its joints. The network lifts those heatmaps
+    # into 3D, so a person standing where nobody is (a "phantom") can still get a confident score from the 3D stages while the 2D
+    # maps at its projected joints are empty in some views. For each person and view: the mean over the joints that fall inside
+    # the image of the strongest heatmap value within +-2 cells (+-8 network pixels) of the joint's projection; -1 when fewer
+    # than 6 joints are inside. Returns [[row, view0, view1, ...], ...] for the rows of `poses` that hold a person.
+    def person_support(self, poses, heat_in):
+        torch = self.torch
+        F = torch.nn.functional
+        rows = np.nonzero(poses[:, 0, 3] >= 0)[0]
+        if len(rows) == 0:
+            return []
+        hm = F.max_pool2d(heat_in[0].detach().float(), 5, 1, 2)                       # (views, joints, h, w)
+        V, J, Hh, Ww = hm.shape
+        pts = torch.from_numpy(np.ascontiguousarray(poses[rows, :, 0:3])).to(self.device).reshape(-1, 3)   # (n * joints, 3) mm
+        A = self.resize_transform                                                      # frame pixel -> network pixel (2 x 3)
+        n = len(rows)
+        net_w = float(self.config.DATASET.IMAGE_SIZE[0])
+        s = net_w / float(Ww)                                                          # network pixels per heatmap cell (4)
+        joint = torch.arange(J, device=self.device).repeat(n)
+        out = np.full((n, V), -1.0, np.float32)
+        for v in range(V):
+            pix = self.project_pose(pts, self.cameras[SEQ][v])                         # frame pixels
+            net = pix @ A[:, :2].T + A[:, 2]
+            hx = torch.round((net[:, 0] - (s - 1.0) / 2.0) / s).long()
+            hy = torch.round((net[:, 1] - (s - 1.0) / 2.0) / s).long()
+            inside = (hx >= 0) & (hx < Ww) & (hy >= 0) & (hy < Hh)
+            vals = hm[v][joint, hy.clamp(0, Hh - 1), hx.clamp(0, Ww - 1)]
+            vals = torch.where(inside, vals, torch.zeros_like(vals)).reshape(n, J)
+            cnt = inside.reshape(n, J).sum(1)
+            mean = vals.sum(1) / cnt.clamp(min=1)
+            out[:, v] = torch.where(cnt >= 6, mean, torch.full_like(mean, -1.0)).cpu().numpy()
+        return [[int(r)] + [round(float(x), 4) for x in out[i]] for i, r in enumerate(rows)]
+
+    # Wraps a module's forward so that the time it takes (GPU included) is added to self.stage[name].
+    def _time_stage(self, module, name):
+        torch = self.torch
+        inner = module.forward
+
+        def timed(*a, **k):
+            t = time.perf_counter()
+            out = inner(*a, **k)
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize()
+            self.stage[name] = self.stage.get(name, 0.0) + (time.perf_counter() - t) * 1000.0
+            return out
+
+        module.forward = timed
+
     def infer(self, views, min_score, heat_joint=None):
         torch = self.torch
         t0 = time.perf_counter()
@@ -411,11 +471,23 @@ class Engine:
             torch.cuda.synchronize()
         t1 = time.perf_counter()
         self.last_heat = None
+        self.stage = {}
         with torch.no_grad():
+            # ONE backbone pass for every view (the repo loops over the views): a third of the kernel launches, and each launch is
+            # something the GPU has to schedule between everybody else's work
+            tb = time.perf_counter()
+            heatmaps = self.backbone(inputs[0]).unsqueeze(0)               # (1, views, joints, 128, 240)
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize()
+            self.stage['backbone'] = (time.perf_counter() - tb) * 1000.0
             fused, _, centers, heat_in, _ = self.model(
-                backbone=self.backbone, views=inputs, meta={'seq': [SEQ]},
+                backbone=None, views=None, input_heatmaps=heatmaps, meta={'seq': [SEQ]},
                 cameras=self.cameras, resize_transform=self.resize_transform)
+            self.last_proposals = int((centers[0, :, 3] >= 0).sum().item())
             poses = fused[0].detach().cpu().numpy().astype('<f4')
+            ts = time.perf_counter()
+            self.last_support = self.person_support(poses, heat_in)
+            self.stage['support'] = (time.perf_counter() - ts) * 1000.0
             if heat_joint is not None:
                 self.last_heat = self.heat_maps(heat_in, heat_joint)
         t2 = time.perf_counter()
@@ -428,7 +500,7 @@ class Engine:
 def handle_client(conn, engine, args):
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     conn.settimeout(None)
-    send_packet(conn, {'type': 'hello', 'protocol': PROTOCOL, 'device': str(engine.device),
+    send_packet(conn, {'type': 'hello', 'protocol': PROTOCOL, 'server_version': SERVER_VERSION, 'device': str(engine.device),
                        'gpu': engine.gpu_name, 'joints': 15,
                        'preprocess': args.preprocess, 'masked_projection': not args.no_mask})
     while True:
@@ -465,7 +537,10 @@ def handle_client(conn, engine, args):
                 reply = {'type': 'result', 'id': msg.get('id'), 'config_id': engine.config_id,
                          'people': int(poses.shape[0]), 'joints': int(poses.shape[1]),
                          't_pre': engine.last_timing[0], 't_net': engine.last_timing[1],
-                         't_total': total, 'poses_bytes': int(poses.nbytes)}
+                         't_total': total, 'poses_bytes': int(poses.nbytes),
+                         't_backbone': engine.stage.get('backbone', 0.0), 't_root': engine.stage.get('root', 0.0),
+                         't_joint': engine.stage.get('joint', 0.0), 'proposals': engine.last_proposals,
+                         't_support': engine.stage.get('support', 0.0), 'support': engine.last_support}
                 payload = poses.tobytes()
                 if engine.last_heat is not None:
                     hv, hh, hw = engine.last_heat.shape
@@ -539,6 +614,10 @@ def main():
                     help='project voxels exactly like the original repo (no behind-camera / lens-validity mask)')
     ap.add_argument('--idle-exit', type=int, default=900,
                     help='exit after this many seconds without a client (0 = never)')
+    ap.add_argument('--cpu-priority', choices=['idle', 'below', 'normal', 'above', 'high'], default='normal',
+                    help='Windows CPU priority class of this process (the other half of sharing the laptop with Unity)')
+    ap.add_argument('--gpu-priority', choices=['idle', 'below', 'normal', 'above', 'high'], default='normal',
+                    help='class the Windows GPU scheduler uses between processes (see proc_priority.py)')
     ap.add_argument('--log-file', help='append stdout + stderr to this file (Unity tails it into its Console)')
     args = ap.parse_args()
 
@@ -551,6 +630,10 @@ def main():
                 stream.reconfigure(encoding='utf-8', errors='replace')
             except Exception:
                 pass
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import proc_priority
+    proc_priority.apply(args.cpu_priority, args.gpu_priority, log)
 
     t0 = time.time()
     engine = Engine(args)

@@ -13,6 +13,10 @@ public sealed class FvpPerson
     public Vector3 velocity; // horizontal root velocity, m/s, from the last estimates of this id (zero for a new person)
     public float errMm = -1f; // mean joint distance to the ground truth at the same instant, mm; < 0 = nothing to compare with
     public bool ghost;       // there is ground truth, and nobody within a metre of this skeleton
+    public float[] support;  // per view: how strongly that view's own 2D heatmaps back the skeleton's joints (0-1; < 0 = not enough of it in the image)
+    public float meanSupport = -1f;   // mean over the views that see it; < 0 = the server sent none
+    public bool phantom;     // the phantom filter's verdict (see FasterVoxelPoseLive.Phantoms.cs): probably nobody there
+    public string phantomWhy = "";   // why, in a few words
 
     public Vector3 Root => joints[FvpSkeleton.MidHip];
     public Color Color => FvpSkeleton.ColorFor(id);
@@ -60,11 +64,21 @@ public sealed class FvpAnimState
     }
 }
 
+// One instant of the scene on the dense timeline (30 a second while live), whether or not an estimate was made for it: enough to put
+// the scene back (Animators + everything else that moves), so stepping back one frame has a frame to step back to.
+public sealed class FvpMoment
+{
+    public double sceneTime;
+    public int unityFrame;         // the rendered frame it was recorded at the end of
+    public FvpAnimState[] anims;
+    public FvpSceneSnapshot scene;
+}
+
 // One captured + estimated frame: what the cameras showed, what the network answered, and the scene state.
 public sealed class FvpFrame
 {
     public int id;
-    public double sceneTime;       // Time.time when the images were taken
+    public double sceneTime;       // scene time when the images were taken: Time.time, minus the stretches of it that were rewound away (see FasterVoxelPoseLive.SceneNow)
     public int unityFrame;
     public float realtime;         // Time.realtimeSinceStartup, for latency
     public int width, height;
@@ -79,18 +93,26 @@ public sealed class FvpFrame
 
     public float[] poses;          // [maxPeople, 15, 5]: x, y, z (mm, model frame), valid, score
     public readonly List<FvpPerson> people = new List<FvpPerson>();
+    // Skeletons the phantom filter took out of `people` (see FasterVoxelPoseLive.Phantoms.cs).
+    public readonly List<FvpPerson> phantoms = new List<FvpPerson>();
     // Ground truth at the instant of the capture: the avatar rigs read out as the same 15 joints (see FvpGroundTruth).
     public readonly List<FvpPerson> groundTruth = new List<FvpPerson>();
     // Which GPU copy of each camera's image belongs to this frame (see FasterVoxelPoseLive.FrozenImage).
     public int frozenBuffer = -1;
     public int[] frozenSerial;
     public float netMs, totalMs;
+    public float backboneMs, rootMs, jointMs;   // where the server spent its time (the 2D ResNet, finding people, localising their joints)
+    public int proposals = -1;                  // people the server localised (before the confidence filter); -1 = not reported
     // The 2D joint heatmaps of every view, laid over the sent frame (see FvpProtocol): [view][y * heatW + x], 255 = 1.0.
     // heatJoint is the joint they are for (-1 = the strongest of all). Null when not asked for or the server is older.
     public byte[][] heat;
     public int heatW, heatH, heatJoint = -2;
     public float latencyMs;        // capture -> estimate in hand
     public bool fromStep;          // captured by a single step while paused
+    // What the other models (ViTPose...) made of this frame, by model name; FasterVoxelPose's own result is People / poses.
+    public readonly Dictionary<string, object> modelResults = new Dictionary<string, object>();
+    public bool consumerOnly;      // captured only for the other models (FasterVoxelPose itself was not up): never in the history
+    public bool placeholder;       // not an estimate: stands for a moment of the timeline that has none yet (its people are empty)
     public bool estimated;
     public bool evicted;           // dropped from history while buffers were still in use
 }
