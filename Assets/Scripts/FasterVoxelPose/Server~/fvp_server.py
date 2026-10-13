@@ -433,8 +433,8 @@ class Engine:
         net_w = float(self.config.DATASET.IMAGE_SIZE[0])
         s = net_w / float(Ww)                                                          # network pixels per heatmap cell (4)
         joint = torch.arange(J, device=self.device).repeat(n)
-        out = np.full((n, V), -1.0, np.float32)
-        for v in range(V):
+        per_view = []
+        for v in range(V):                                                             # no host round trip inside: one transfer at the end
             pix = self.project_pose(pts, self.cameras[SEQ][v])                         # frame pixels
             net = pix @ A[:, :2].T + A[:, 2]
             hx = torch.round((net[:, 0] - (s - 1.0) / 2.0) / s).long()
@@ -444,7 +444,8 @@ class Engine:
             vals = torch.where(inside, vals, torch.zeros_like(vals)).reshape(n, J)
             cnt = inside.reshape(n, J).sum(1)
             mean = vals.sum(1) / cnt.clamp(min=1)
-            out[:, v] = torch.where(cnt >= 6, mean, torch.full_like(mean, -1.0)).cpu().numpy()
+            per_view.append(torch.where(cnt >= 6, mean, torch.full_like(mean, -1.0)))
+        out = torch.stack(per_view, dim=1).cpu().numpy()
         return [[int(r)] + [round(float(x), 4) for x in out[i]] for i, r in enumerate(rows)]
 
     # Wraps a module's forward so that the time it takes (GPU included) is added to self.stage[name].

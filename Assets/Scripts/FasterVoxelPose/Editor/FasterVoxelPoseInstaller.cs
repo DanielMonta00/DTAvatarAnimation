@@ -135,24 +135,24 @@ public static class FasterVoxelPoseInstaller
         return null;
     }
 
-    // ---- the recorder's own live overlay ----
+    // ---- leftover of the removed recorder overlay component ----
 
-    [MenuItem("Tools/FasterVoxelPose/Show live ground truth on the MultiViewRecorder's cameras")]
-    public static void AddRecorderLiveOverlay()
+    // The recorder's live keypoints are now part of MultiViewRecorder itself (Draw Keypoint Gizmos). A scene that still carries the old extra
+    // component shows it as a missing script: this removes those from the recorders' objects.
+    [MenuItem("Tools/FasterVoxelPose/Remove the old live-overlay component from the MultiViewRecorders")]
+    public static void RemoveOldRecorderOverlay()
     {
-        MultiViewRecorder[] recorders = Object.FindObjectsByType<MultiViewRecorder>(FindObjectsInactive.Include, FindObjectsSortMode.None);
-        if (recorders.Length == 0) { Debug.LogWarning("[RecorderLiveOverlay] no MultiViewRecorder in the open scene."); return; }
-        int added = 0;
-        foreach (MultiViewRecorder r in recorders)
+        int removed = 0;
+        foreach (MultiViewRecorder r in Object.FindObjectsByType<MultiViewRecorder>(FindObjectsInactive.Include, FindObjectsSortMode.None))
         {
-            if (r.TryGetComponent(out RecorderLiveOverlay _)) continue;
-            Undo.AddComponent<RecorderLiveOverlay>(r.gameObject);
+            int n = GameObjectUtility.GetMonoBehavioursWithMissingScriptCount(r.gameObject);
+            if (n == 0) continue;
+            Undo.RegisterFullObjectHierarchyUndo(r.gameObject, "Remove missing scripts");
+            removed += GameObjectUtility.RemoveMonoBehavioursWithMissingScript(r.gameObject);
             EditorSceneManager.MarkSceneDirty(r.gameObject.scene);   // not saved: the scene is usually open with unsaved work
-            added++;
         }
-        Debug.Log(added > 0
-            ? $"[RecorderLiveOverlay] added to {added} MultiViewRecorder(s): in Play the recorder's keypoints (what keyrgb shows) are drawn live over its cameras' displays. Save the scene to keep it."
-            : "[RecorderLiveOverlay] every MultiViewRecorder already has it.");
+        Debug.Log(removed > 0 ? $"[MultiViewRecorder] removed {removed} missing-script component(s) from the recorders' objects. Save the scene to keep it."
+                              : "[MultiViewRecorder] no missing script on the recorders' objects.");
     }
 
     // ---- server ----

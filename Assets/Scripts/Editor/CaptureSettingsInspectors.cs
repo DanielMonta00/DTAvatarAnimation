@@ -14,6 +14,11 @@ public class MultiViewRecorderEditor : Editor
         DrawWithConditionalCustomSize(serializedObject, "captureResolution");
     }
 
+    static readonly System.Collections.Generic.HashSet<string> ReplayDetails = new System.Collections.Generic.HashSet<string>
+    {
+        "datasetFolder", "datasetCamera", "takeTimeOffset", "cameraDelay", "replayAnimatorState", "replayStartFrame",
+    };
+
     public static void DrawWithConditionalCustomSize(SerializedObject so, string resolutionFieldName)
     {
         so.Update();
@@ -27,6 +32,13 @@ public class MultiViewRecorderEditor : Editor
                 using (new EditorGUI.DisabledScope(true))
                     EditorGUILayout.PropertyField(prop);
                 continue;
+            }
+
+            // Dataset replay: its settings only show while it is switched on.
+            if (ReplayDetails.Contains(prop.name))
+            {
+                var on = so.FindProperty("replayDataset");
+                if (on != null && !on.boolValue) continue;
             }
 
             if (prop.name == "customWidth" || prop.name == "customHeight")

@@ -36,7 +36,7 @@ using System.Threading.Tasks;
 // frame is committed only after every camera's GPU readback succeeds, so the
 // JSON entry count equals the file count in each cam_N/rgb/ folder.
 [DefaultExecutionOrder(900)]
-public class MultiViewRecorder : MonoBehaviour
+public partial class MultiViewRecorder : MonoBehaviour
 {
     [Header("Subjects")]
     [Tooltip("Animators to track (multi-person). Each becomes one entry in the per-frame 'persons' array.")]
@@ -111,8 +111,12 @@ public class MultiViewRecorder : MonoBehaviour
     [Header("Frame timing")]
     [Tooltip("Deterministic capture: drive Time.captureFramerate so game time advances a fixed step per frame and every frame is captured regardless of encode speed. NOTE: incompatible with a live VideoPlayer in the scene (starves its decoder). Leave off for real-time capture with frame-dropping.")]
     public bool setCaptureFramerate = false;
-    [Tooltip("Fixed frames-per-second used when Set Capture Framerate is enabled.")]
+    [Tooltip("Fixed frames-per-second used when Set Capture Framerate is enabled (and as the pace below).")]
     public int frameRate = 30;
+    [Tooltip("Real-time capture (Set Capture Framerate off): capture at most Frame Rate times a second, evenly spaced, instead of every rendered frame. " +
+             "Capturing every frame of a game that renders at 60 fps or more means 60 full-size readbacks and JPEG / PNG encodes a second for each camera: the encoders fall behind, " +
+             "frames are skipped at irregular moments (a choppy video) and the game itself slows down. Off = every rendered frame, as before.")]
+    public bool paceCaptureToFrameRate = true;
 
     [Header("Image orientation")]
     [Tooltip("Flip rows before encoding PNG so the saved image is top-down.")]
@@ -126,8 +130,23 @@ public class MultiViewRecorder : MonoBehaviour
     public bool drawSkeleton = true;
     public Color bboxVisColor = new Color(1f, 1f, 0f, 1f);
 
+    [Header("Video export")]
+    [Tooltip("Also write each camera's frames as one continuous video: cam_N/video_rgb.avi (Motion-JPEG, the same JPEGs as rgb/, no second encode). " +
+             "With PNG as the image format a JPEG is made for the video as well. Plays in VLC / ffmpeg / OpenCV; tick 'Convert Video To Mp4' for a file any player takes.")]
+    public bool writeVideo = false;
+    [Tooltip("Also write cam_N/video_keyrgb.avi, the video of the keypoint-overlay pictures. Independent of Write Keyrgb Overlay: you can have this video without the keyrgb/ images (and the images without the video).")]
+    public bool videoIncludeKeyrgb = true;
+    [Tooltip("Frames per second written into the video. 0 = automatic: Frame Rate when Set Capture Framerate is on (every frame is captured, so the video plays at the speed of the scene), " +
+             "otherwise the average capture rate of the recording (frames can be dropped in real-time capture, so this keeps the video at real-time speed).")]
+    [Min(0f)] public float videoFrameRate = 0f;
+    [Tooltip("When the session ends, also convert each video to H.264 .mp4 with ffmpeg (the .avi is kept). Runs in the background.")]
+    public bool convertVideoToMp4 = false;
+    [Tooltip("Full path of ffmpeg.exe for the conversion. Empty = 'ffmpeg' from the PATH.")]
+    public string ffmpegPath = "";
+
     [Header("Gizmos - Ground Truth Keypoints")]
-    [Tooltip("Draw ground truth keypoint gizmos in the scene view (keypoints only, no model/estimation data).")]
+    [Tooltip("Draw the ground truth keypoints (no model / estimation data): as 3D gizmos in the Scene view, and in Play mode over each camera's own display in the Game view (the keyrgb picture, live), " +
+             "recording or not. One switch for both. See MultiViewRecorder.LiveKeypoints.cs.")]
     public bool drawKeypointGizmos = true;
     [Tooltip("Radius of keypoint joint spheres in the scene gizmo.")]
     public float gizmoJointRadius = 0.05f;
@@ -165,6 +184,7 @@ public class MultiViewRecorder : MonoBehaviour
         public CalibratedCamera calib;        // non-null => calibrated K (+ lens distortion when DistortionActive)
         public bool sourceLostWarned;         // warn once when the image source disappears
         public string rgbDir, keyrgbDir, bboxDir, bboxVisDir;
+        public MjpegAviWriter videoRgb, videoKey;   // the continuous videos of this camera (null = not written)
         public int width, height;
         public int index1; // 1-based folder index (cam_1/, cam_2/, ...)
         public bool IsDome => domeCam != null;
@@ -184,6 +204,11 @@ public class MultiViewRecorder : MonoBehaviour
     int lastCapturedUnityFrame = -1;
     bool _capturing;
     int _inFlightEncodes;
+    long _mainThreadTicks;              // time spent on the main thread in GPU readback callbacks (copy + commit), for the session summary
+    int _mainThreadCallbacks;
+    double _nextPacedCapture;           // real time at which the next paced capture is due
+    bool _ffmpegWarned;
+    int _skippedBackpressure;           // Update frames in which no capture started because the encoders were behind
     bool acquired;
     bool _stopping;
     string autoStopReason = "";
@@ -217,7 +242,7 @@ public class MultiViewRecorder : MonoBehaviour
     // ---------------- Lifecycle ----------------
 
     void OnEnable()  { if (record) BeginRecording(); }
-    void OnDisable() { if (acquired) EndRecording(); }
+    void OnDisable() { if (acquired) EndRecording(); DestroyLiveOverlay(); }
     void OnApplicationQuit() { if (acquired) EndRecording(); }
 
     void Update()
@@ -244,6 +269,25 @@ public class MultiViewRecorder : MonoBehaviour
             return;
         }
 
+        // Dataset replay: every picture of the dataset has been recorded.
+        if (ReplayActive && ReplayFinished())
+        {
+            autoStopReason = $"Dataset replay finished ({frameCounter} pictures of {datasetCamera})";
+            _stopping = true;
+            StartCoroutine(StopAndExitRoutine());
+            return;
+        }
+
+        // One full pass of the followed animation has played: stop (and leave Play mode) without waiting for a capture to notice. A capture can be
+        // held back for a while by the encoder back-pressure below, and the loop must not run on until one starts.
+        if (recordOneLoop && LoopCompleted())
+        {
+            autoStopReason = $"One animation loop recorded ({frameCounter} frames)";
+            _stopping = true;
+            StartCoroutine(StopAndExitRoutine());
+            return;
+        }
+
         // Retry name-based bone resolve if the rig wasn't bound at begin time.
         for (int r = 0; r < rigs.Count; r++)
         {
@@ -259,8 +303,17 @@ public class MultiViewRecorder : MonoBehaviour
         int cap = Mathf.Max(1, maxInFlightEncodes) * Mathf.Max(1, slots.Count);
         if (_capturing) return;
         if (Time.frameCount == lastCapturedUnityFrame) return;
-        if (Interlocked.CompareExchange(ref _inFlightEncodes, 0, 0) >= cap) return;
+        if (Interlocked.CompareExchange(ref _inFlightEncodes, 0, 0) >= cap) { if (!ReplayActive) _skippedBackpressure++; return; }   // a replay waits: every picture is recorded
 
+        // Evenly spaced captures at Frame Rate a second (real time). Behind schedule by more than a period: start again from now, no catch-up burst.
+        if (paceCaptureToFrameRate && !setCaptureFramerate && frameRate > 0 && !ReplayActive)
+        {
+            double now = Time.realtimeSinceStartupAsDouble, period = 1.0 / frameRate;
+            if (now < _nextPacedCapture) return;
+            _nextPacedCapture = Math.Max(_nextPacedCapture + period, now - 0.25 * period);
+        }
+
+        if (ReplayActive) ReplayPose();      // the avatar at the instant of the next dataset picture, before this frame is rendered
         StartCoroutine(CaptureRoutine());
     }
 
@@ -310,6 +363,9 @@ public class MultiViewRecorder : MonoBehaviour
             record = false;
             return;
         }
+
+        // Dataset replay (reads the dataset's timeline, freezes the avatar's Animator): before anything is created on disk.
+        if (!BeginReplay()) { record = false; return; }
 
         // Session folder.
         sessionPath = Path.Combine(Application.dataPath, "..", outputFolder,
@@ -402,6 +458,14 @@ public class MultiViewRecorder : MonoBehaviour
                     slot.captureCam.depth = c.depth + 100f;
                 }
             }
+            if (writeVideo)
+            {
+                double vfps = videoFrameRate > 0f ? videoFrameRate : (setCaptureFramerate ? frameRate : 0.0);   // 0: measured when the file closes
+                Action<string> vlog = m => Debug.LogWarning("[MultiViewRecorder] cam_" + idx1 + " " + m);
+                slot.videoRgb = new MjpegAviWriter(Path.Combine(camRoot, "video_rgb.avi"), slot.width, slot.height, vfps, vlog);
+                if (videoIncludeKeyrgb)                       // independent of Write Keyrgb Overlay: the video needs no keyrgb/ images
+                    slot.videoKey = new MjpegAviWriter(Path.Combine(camRoot, "video_keyrgb.avi"), slot.width, slot.height, vfps, vlog);
+            }
             slots.Add(slot);
         }
 
@@ -415,6 +479,7 @@ public class MultiViewRecorder : MonoBehaviour
         WriteCamerasJson();
 
         frameCounter = 0;
+        _mainThreadTicks = 0; _mainThreadCallbacks = 0; _skippedBackpressure = 0; _nextPacedCapture = 0.0; _ffmpegWarned = false;
         recordingStartTime = -1.0;
         jsonFirstFrame = true;
         lastCapturedUnityFrame = -1;
@@ -428,7 +493,7 @@ public class MultiViewRecorder : MonoBehaviour
     void SetupOneLoop()
     {
         loopAnimator = null;
-        if (!recordOneLoop) return;
+        if (!recordOneLoop || ReplayActive) return;
 
         foreach (var a in avatars)
             if (a != null && a.isActiveAndEnabled && a.runtimeAnimatorController != null) { loopAnimator = a; break; }
@@ -463,14 +528,28 @@ public class MultiViewRecorder : MonoBehaviour
     {
         if (!acquired) return;
         acquired = false;
+        string replaySummary = ReplayActive ? $"; dataset replay: pictures {_replayFirst}..{_replayFirst + frameCounter - 1} of {ReplayPictureCount}" : "";
+        EndReplay();
 
-        // Drain in-flight encodes so JSON close + RT release happen safely.
+        // The last two or three frames are still on their way back from the GPU. Stopping here used to lose them (their callbacks never ran: the
+        // session was already closed); WaitAllRequests runs the callbacks of every request in flight before it returns, so they are committed now.
+        try { AsyncGPUReadback.WaitAllRequests(); }
+        catch (Exception e) { Debug.LogWarning("[MultiViewRecorder] could not flush the last GPU readbacks: " + e.Message); }
+
+        // Drain in-flight encodes so JSON close + RT release happen safely. A frame is listed in the JSON as soon as it is committed, so a file
+        // that is still being encoded when the session closes would be listed and missing: wait for all of them (full-size PNGs can take seconds).
+        int pending = Interlocked.CompareExchange(ref _inFlightEncodes, 0, 0);
+        if (pending > 8) Debug.Log($"[MultiViewRecorder] finishing {pending} image encodes before closing the session...");
         int waited = 0;
-        while (Interlocked.CompareExchange(ref _inFlightEncodes, 0, 0) > 0 && waited < 5000)
+        while (Interlocked.CompareExchange(ref _inFlightEncodes, 0, 0) > 0 && waited < 120000)
         {
             Thread.Sleep(20);
             waited += 20;
         }
+        if (Interlocked.CompareExchange(ref _inFlightEncodes, 0, 0) > 0)
+            Debug.LogWarning("[MultiViewRecorder] some image encodes did not finish within 2 minutes; the last frames may be listed in the JSON without their files.");
+
+        CloseVideos();
 
         for (int i = 0; i < slots.Count; i++)
         {
@@ -490,8 +569,73 @@ public class MultiViewRecorder : MonoBehaviour
         if (setCaptureFramerate) Time.captureFramerate = 0;
 
         CloseJsonWriter();
-        Debug.Log($"[MultiViewRecorder] Session ended at {sessionPath} ({frameCounter} frames)");
+        double seconds = recordingStartTime >= 0.0 ? Time.realtimeSinceStartup - recordingStartTime : 0.0;
+        double cbMs = _mainThreadCallbacks > 0 ? _mainThreadTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency / _mainThreadCallbacks : 0.0;
+        string summary = $"[MultiViewRecorder] Session ended at {sessionPath} ({frameCounter} frames" +
+                  (seconds > 0.5 ? $" in {seconds:F1} s = {frameCounter / seconds:F1} per second" : "") + ")" +
+                  (_skippedBackpressure > 0 ? $"; {_skippedBackpressure} rendered frames were NOT captured because the image encoders were behind (use JPEG, fewer outputs, or Set Capture Framerate)" : "") +
+                  (_mainThreadCallbacks > 0 ? $"; GPU readback handling took {cbMs:F1} ms of the main thread per camera image" : "") + replaySummary;
+        if (_skippedBackpressure > 0) Debug.LogWarning(summary);   // a warning, so it shows even with the Console's info filter off
+        else Debug.Log(summary);
         sessionPath = null;
+    }
+
+    // ---------------- Video export ----------------
+
+    // Waits for the last frames, finishes the .avi file(s) (the frame rate is measured here when it was not fixed) and starts the .mp4 conversions.
+    void CloseVideos()
+    {
+        foreach (var slot in slots)
+        {
+            foreach (var w in new[] { slot.videoRgb, slot.videoKey })
+            {
+                if (w == null) continue;
+                w.Close();
+                foreach (string f in w.Files)
+                {
+                    Debug.Log($"[MultiViewRecorder] cam_{slot.index1} video: {f} ({w.Frames} frames{(w.Skipped > 0 ? ", " + w.Skipped + " left out" : "")})");
+                    if (convertVideoToMp4) ConvertToMp4(f);
+                }
+            }
+            slot.videoRgb = slot.videoKey = null;
+        }
+    }
+
+    // ffmpeg in the background; the .avi stays. Even dimensions (yuv420p needs them). Encoders are tried in order until one works: libx264 (the
+    // usual build), h264_mf (Windows' own H.264, in builds without libx264), mpeg4 (always there).
+    static readonly string[] Mp4Encoders =
+    {
+        "-c:v libx264 -preset medium -crf 18",
+        "-c:v h264_mf -b:v 8M",
+        "-c:v mpeg4 -q:v 2",
+    };
+
+    void ConvertToMp4(string avi, int attempt = 0)
+    {
+        string exe = string.IsNullOrWhiteSpace(ffmpegPath) ? "ffmpeg" : ffmpegPath;
+        string mp4 = Path.ChangeExtension(avi, ".mp4");
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(exe,
+                $"-y -hide_banner -loglevel error -i \"{avi}\" -vf \"pad=ceil(iw/2)*2:ceil(ih/2)*2\" {Mp4Encoders[attempt]} -pix_fmt yuv420p -movflags +faststart \"{mp4}\"")
+            { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
+            var proc = System.Diagnostics.Process.Start(psi);
+            proc.EnableRaisingEvents = true;
+            proc.Exited += (o, a) =>
+            {
+                string err = ""; try { err = proc.StandardError.ReadToEnd().Trim(); } catch { }
+                if (proc.ExitCode == 0) { Debug.Log("[MultiViewRecorder] converted " + mp4); return; }
+                if (attempt + 1 < Mp4Encoders.Length) { ConvertToMp4(avi, attempt + 1); return; }   // that ffmpeg lacks this encoder: the next one
+                Debug.LogWarning($"[MultiViewRecorder] ffmpeg could not convert {Path.GetFileName(avi)} (exit {proc.ExitCode}): {err}");
+            };
+        }
+        catch (Exception e)
+        {
+            if (_ffmpegWarned) return;       // one message per session, not one per video
+            _ffmpegWarned = true;
+            string why = e is System.ComponentModel.Win32Exception ? "it is not on the PATH" : e.Message;
+            Debug.LogWarning($"[MultiViewRecorder] could not start ffmpeg ('{exe}': {why}). Set 'Ffmpeg Path' (Video export) to the full path of ffmpeg.exe, or untick 'Convert Video To Mp4'; the .avi videos are complete and play as they are.");
+        }
     }
 
     // Dome pipeline needs an externally-provided RenderTexture to Blit the
@@ -562,6 +706,7 @@ public class MultiViewRecorder : MonoBehaviour
             if (recordingStartTime < 0.0) recordingStartTime = Time.realtimeSinceStartup;
             double relTime = Time.realtimeSinceStartup - recordingStartTime;
             string ts = relTime.ToString("F6", CultureInfo.InvariantCulture);
+            if (ReplayActive) ReplayFrameIdentity(idx, out relTime, out ts);      // the dataset's own time and picture name
             lastCapturedUnityFrame = Time.frameCount;
 
             int kpCount = def.Count;
@@ -660,7 +805,6 @@ public class MultiViewRecorder : MonoBehaviour
             int pendingReadbacks = slotCount;
             byte[][] allBytes = new byte[slotCount][];
             int[] hadError = new int[slotCount];
-            bool flip = flipOutputY;
 
             for (int c = 0; c < slotCount; c++)
             {
@@ -695,18 +839,22 @@ public class MultiViewRecorder : MonoBehaviour
 
                 AsyncGPUReadback.Request(slot.source, 0, TextureFormat.RGB24, req =>
                 {
+                    long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
                     try
                     {
                         if (req.hasError) { hadError[ci] = 1; return; }
-                        byte[] bytes = req.GetData<byte>().ToArray();
-                        if (flip) bytes = FlipRowsRGB24(bytes, w, h);
-                        allBytes[ci] = bytes;
+                        // The one copy that has to happen here (the GPU buffer dies with the callback). The row flip and the clones for the
+                        // overlay / bbox pictures used to follow on this thread, tens of milliseconds a frame at full size with several
+                        // cameras, which is what made the game stutter while recording: they run on the encode threads now.
+                        allBytes[ci] = req.GetData<byte>().ToArray();
                     }
                     finally
                     {
                         int remaining = Interlocked.Decrement(ref pendingReadbacks);
                         if (remaining == 0)
                             CommitFrame(idx, relTime, ts, frameJson, allBytes, hadError, imgPosByCam, visByCam);
+                        Interlocked.Add(ref _mainThreadTicks, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
+                        Interlocked.Increment(ref _mainThreadCallbacks);
                     }
                 });
             }
@@ -728,6 +876,8 @@ public class MultiViewRecorder : MonoBehaviour
                 return;
             }
         }
+
+        bool flipOut = flipOutputY;         // read by the encode tasks below (the flip happens there, not on the main thread)
 
         lock (jsonLock)
         {
@@ -806,51 +956,68 @@ public class MultiViewRecorder : MonoBehaviour
             // RGB encode.
             string rgbExt = CaptureSettings.Extension(imageFormat);
             string rgbPath = Path.Combine(slot.rgbDir, ts + rgbExt);
-            byte[] rgbBuf = bytes;
             int wRgb = w, hRgb = h;
             var fmt = imageFormat;
             var q = jpegQuality;
+            // The video takes this frame's JPEG, in order: the writer waits on this task, whichever encode thread finishes first.
+            TaskCompletionSource<byte[]> vidRgb = null;
+            if (slot.videoRgb != null) { vidRgb = new TaskCompletionSource<byte[]>(); slot.videoRgb.Append(vidRgb.Task, timestamp); }
             Interlocked.Increment(ref _inFlightEncodes);
             Task.Run(() =>
             {
+                byte[] forVideo = null;
                 try
                 {
+                    byte[] rgbBuf = flipOut ? FlipRowsRGB24(bytes, wRgb, hRgb) : bytes;
                     byte[] enc = (fmt == CaptureImageFormat.JPEG)
                         ? ImageConversion.EncodeArrayToJPG(rgbBuf, GraphicsFormat.R8G8B8_UNorm, (uint)wRgb, (uint)hRgb, 0, q)
                         : ImageConversion.EncodeArrayToPNG(rgbBuf, GraphicsFormat.R8G8B8_UNorm, (uint)wRgb, (uint)hRgb);
                     File.WriteAllBytes(rgbPath, enc);
+                    if (vidRgb != null)
+                        forVideo = fmt == CaptureImageFormat.JPEG ? enc : ImageConversion.EncodeArrayToJPG(rgbBuf, GraphicsFormat.R8G8B8_UNorm, (uint)wRgb, (uint)hRgb, 0, q);
                 }
                 catch (Exception e) { Debug.LogError("[MultiViewRecorder] rgb: " + e); }
-                finally { Interlocked.Decrement(ref _inFlightEncodes); }
+                finally { vidRgb?.TrySetResult(forVideo); Interlocked.Decrement(ref _inFlightEncodes); }
             });
 
-            // keyrgb (overlay): clone before drawing so we don't corrupt rgb buffer.
-            if (writeKeyrgbOverlay && slot.keyrgbDir != null)
+            // keyrgb (overlay): clone before drawing so we don't corrupt rgb buffer. Made for the images (Write Keyrgb Overlay) and / or for the
+            // video (Include Keyrgb Video): each is its own choice, so the video can be written without the images.
+            bool keyImages = writeKeyrgbOverlay && slot.keyrgbDir != null;
+            if (keyImages || slot.videoKey != null)
             {
                 int pointR = pointRadiusPx;
                 int lineT = lineThicknessPx;
                 bool drawSkel = drawSkeleton;
                 Color32[] colors = kpColors;
                 int[,] edges = def.edges;
-                byte[] krBuf = (byte[])bytes.Clone();
-                string krPath = Path.Combine(slot.keyrgbDir, ts + rgbExt);
+                string krPath = keyImages ? Path.Combine(slot.keyrgbDir, ts + rgbExt) : null;
                 int wK = w, hK = h;
                 var krFmt = imageFormat;
                 var krQ = jpegQuality;
+                TaskCompletionSource<byte[]> vidKey = null;
+                if (slot.videoKey != null) { vidKey = new TaskCompletionSource<byte[]>(); slot.videoKey.Append(vidKey.Task, timestamp); }
                 Interlocked.Increment(ref _inFlightEncodes);
                 Task.Run(() =>
                 {
+                    byte[] forVideo = null;
                     try
                     {
+                        byte[] krBuf = flipOut ? FlipRowsRGB24(bytes, wK, hK) : (byte[])bytes.Clone();    // a copy of its own: the overlay is drawn into it
                         for (int p = 0; p < allPts.Length; p++)
                             DrawOverlay(krBuf, wK, hK, allPts[p], allVis[p], colors, edges, pointR, lineT, drawSkel);
-                        byte[] enc = (krFmt == CaptureImageFormat.JPEG)
-                            ? ImageConversion.EncodeArrayToJPG(krBuf, GraphicsFormat.R8G8B8_UNorm, (uint)wK, (uint)hK, 0, krQ)
-                            : ImageConversion.EncodeArrayToPNG(krBuf, GraphicsFormat.R8G8B8_UNorm, (uint)wK, (uint)hK);
-                        File.WriteAllBytes(krPath, enc);
+                        if (krPath != null)
+                        {
+                            byte[] enc = (krFmt == CaptureImageFormat.JPEG)
+                                ? ImageConversion.EncodeArrayToJPG(krBuf, GraphicsFormat.R8G8B8_UNorm, (uint)wK, (uint)hK, 0, krQ)
+                                : ImageConversion.EncodeArrayToPNG(krBuf, GraphicsFormat.R8G8B8_UNorm, (uint)wK, (uint)hK);
+                            File.WriteAllBytes(krPath, enc);
+                            if (vidKey != null && krFmt == CaptureImageFormat.JPEG) forVideo = enc;      // the image's own JPEG: no second encode
+                        }
+                        if (vidKey != null && forVideo == null)
+                            forVideo = ImageConversion.EncodeArrayToJPG(krBuf, GraphicsFormat.R8G8B8_UNorm, (uint)wK, (uint)hK, 0, krQ);
                     }
                     catch (Exception e) { Debug.LogError("[MultiViewRecorder] keyrgb: " + e); }
-                    finally { Interlocked.Decrement(ref _inFlightEncodes); }
+                    finally { vidKey?.TrySetResult(forVideo); Interlocked.Decrement(ref _inFlightEncodes); }
                 });
             }
 
@@ -860,7 +1027,6 @@ public class MultiViewRecorder : MonoBehaviour
                 Color32 bc = bboxVisColor;
                 int lt = Mathf.Max(1, lineThicknessPx);
                 float pad = bboxPaddingFraction;
-                byte[] bvBuf = (byte[])bytes.Clone();
                 string bvPath = Path.Combine(slot.bboxVisDir, ts + ".png");
                 int wB = w, hB = h;
                 Interlocked.Increment(ref _inFlightEncodes);
@@ -868,6 +1034,7 @@ public class MultiViewRecorder : MonoBehaviour
                 {
                     try
                     {
+                        byte[] bvBuf = flipOut ? FlipRowsRGB24(bytes, wB, hB) : (byte[])bytes.Clone();
                         for (int p = 0; p < allPts.Length; p++)
                         {
                             if (TryComputePersonBboxPx(allPts[p], allVis[p], wB, hB, pad,
@@ -1139,6 +1306,7 @@ public class MultiViewRecorder : MonoBehaviour
         sb.Append("  {");
         sb.Append("\n    \"frame_index\": ").Append(idx).Append(",");
         sb.Append("\n    \"timestamp\": ").Append(F(relTime)).Append(",");
+        sb.Append(ReplayFrameJson(idx));
         // rgb_paths / keyrgb_paths as { "cam_N": "cam_N/rgb/<t>.<ext>" } dicts —
         // safer than positional arrays if a camera is dropped or reordered later.
         string ext = CaptureSettings.Extension(imageFormat);
@@ -1230,7 +1398,8 @@ public class MultiViewRecorder : MonoBehaviour
         sb.Append("  {");
         sb.Append("\n    \"frame_index\": ").Append(idx).Append(",");
         sb.Append("\n    \"timestamp\": ").Append(F(relTime)).Append(",");
-        sb.Append("\n    \"rgb_path\": \"rgb/").Append(ts).Append(ext).Append("\",");
+        sb.Append(ReplayFrameJson(idx));
+        sb.Append("\n    \"rgb_path\":\"rgb/").Append(ts).Append(ext).Append("\",");
         if (writeKeyrgbOverlay)
             sb.Append("\n    \"keyrgb_path\": \"keyrgb/").Append(ts).Append(ext).Append("\",");
         sb.Append("\n    \"image_size\": [").Append(slot.width).Append(",").Append(slot.height).Append("],");
@@ -1430,6 +1599,7 @@ public class MultiViewRecorder : MonoBehaviour
         jsonWriter.Write("{\n");
         jsonWriter.Write($"  \"dataset\": \"{def.tag}\",\n");
         jsonWriter.Write("  \"num_keypoints\": "); jsonWriter.Write(def.Count.ToString(CultureInfo.InvariantCulture)); jsonWriter.Write(",\n");
+        jsonWriter.Write(ReplayHeaderJson());
         if (!flatLayout) jsonWriter.Write("  \"multi_view\": true,\n");
         jsonWriter.Write("  \"coordinate_convention\": { \"image_origin\": \"top_left\", \"unity_screen_origin\": \"bottom_left\", \"world\": \"unity_left_handed_y_up\", \"camera_opencv\": \"x_right_y_down_z_forward_meters\" },\n");
         jsonWriter.Write("  \"keypoint_names\": [");
@@ -1502,11 +1672,9 @@ public class MultiViewRecorder : MonoBehaviour
 
     void OnDrawGizmos()
     {
-        if (!drawKeypointGizmos || rigs.Count == 0) return;
-        if (def == null) return;
-
-        // Only draw if we have resolved the skeleton format and keypoint definitions
-        if (kpColors == null) return;
+        if (!drawKeypointGizmos) return;
+        // No session yet (nothing recorded): the same keypoints from the live data (Play mode).
+        if (rigs.Count == 0 || def == null || kpColors == null) { DrawLiveGizmos(); return; }
 
         DrawGroundTruthGizmos();
     }

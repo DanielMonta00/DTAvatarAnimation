@@ -235,6 +235,11 @@ not measured and not explained yet: candidates are that the real scene's frames 
 and the CPU (the Python process has to feed the GPU while the editor's threads are busy). To find out in your session the card
 now shows where the server's time goes (backbone / root / joints, from stage timers in the server): if all three grow in
 proportion it is waiting for the GPU, not computing.
+`Server Priority` (Normal / Above / High) asks Windows for a higher CPU class and GPU scheduling class for the servers
+(`Server~/proc_priority.py`; applies when a server starts). Windows accepts it without administrator rights (status 0), but whether it
+helps is **not established**: the one experiment that tried it (a graphics load of long frames, with Unity's GPU class lowered, or the servers' raised) had
+a load generator that had not reached full load when the replay started, and the machine was in use, so its numbers cannot be compared. Left at
+Normal; try it, and read the card's backbone / root / joints figures before and after.
 Also done: the 2D backbone runs on all views in **one** batch (a third of the kernel launches), and the camera images are read back
 asynchronously whenever Unity runs above 25 fps (the blocking read that stalls Unity for the wait is kept for slow frames, where it
 saves 2-3 frames of latency).
@@ -271,14 +276,21 @@ engine's pinhole viewport.
 ## The recorder's keypoints, live, with no models
 
 To watch what `MultiViewRecorder` writes into `keyrgb/` while the scene plays (recording or not) you need none of the above: no FasterVoxelPose,
-no servers, no card, no bar, no tabs. **Tools ▸ FasterVoxelPose ▸ Show live ground truth on the MultiViewRecorder's cameras** adds a
-`RecorderLiveOverlay` to the recorder's object (the scene is only marked dirty; save it to keep the component). In Play it draws, over each of
-the recorder's cameras' own displays, the joints of the recorder's **Skeleton Format** (AIC-14 by default, the recorder's head / toe offsets
-and its point radius / line thickness), projected the way the recorder projects them (a `CalibratedCamera`'s lens included), with the
-recorder's colours: left light, right dark, centre, each line the average of its two joints. It is a screen overlay, so `rgb/` and `keyrgb/`
-are untouched. Fisheye (`FulldomeCamera`) cameras are not drawn. `Show` switches it off; `Yield To Faster Voxel Pose` (on) keeps it out of the
-way when a `FasterVoxelPose` component is active, because that draws the ground truth itself (in the 15 Panoptic joints rather than the
-recorder's format). Leave the models' objects deactivated and none of their code runs.
+no servers, no card, no bar, no tabs. It is part of the recorder itself (`MultiViewRecorder.LiveKeypoints.cs`) and **Draw Keypoint Gizmos**, under
+"Gizmos - Ground Truth Keypoints", switches all of it:
+
+* **In the Game view**, in Play mode, the keypoints are drawn over each of the recorder's cameras' own displays: the joints of the recorder's
+  **Skeleton Format** (AIC-14 by default), its head / toe offsets, **Point Radius Px**, **Line Thickness Px** and **Draw Skeleton**, projected the
+  way the recorder projects them (a `CalibratedCamera`'s lens included), with the recorder's colours: left light, right dark, centre, each line
+  the average of its two joints. It is a screen overlay, so `rgb/` and `keyrgb/` are untouched.
+* **In the Scene view** (and the Game view with its Gizmos toggle on) the 3D gizmos draw as before, with **Gizmo Joint Radius**, and now also
+  before recording starts (they used to need a session).
+* Fisheye (`FulldomeCamera`) cameras are not drawn on screen. The overlay stands down while a `FasterVoxelPose` component is active, because that
+  draws the ground truth itself (in the 15 Panoptic joints rather than the recorder's format). Leave the models' objects deactivated and none of
+  their code runs.
+
+(An earlier version was a separate `RecorderLiveOverlay` component. If a scene still has it, it shows as a missing script on the recorder's object:
+**Tools ▸ FasterVoxelPose ▸ Remove the old live-overlay component from the MultiViewRecorders** removes it.)
 
 ## Several models side by side: the `EstimationModels` parent
 
