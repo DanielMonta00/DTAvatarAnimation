@@ -16,7 +16,7 @@ public class MultiViewRecorderEditor : Editor
 
     static readonly System.Collections.Generic.HashSet<string> ReplayDetails = new System.Collections.Generic.HashSet<string>
     {
-        "datasetFolder", "datasetCamera", "takeTimeOffset", "cameraDelay", "replayAnimatorState", "replayStartFrame",
+        "datasetFolder", "datasetCamera", "takeTimeOffset", "cameraDelay", "replayAnimatorState", "replayStartFrame", "replayContentTime",
     };
 
     public static void DrawWithConditionalCustomSize(SerializedObject so, string resolutionFieldName)

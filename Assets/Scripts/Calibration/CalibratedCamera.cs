@@ -89,6 +89,8 @@ public class CalibratedCamera : MonoBehaviour
     LensDistortionRenderer lens;
     Coroutine renderLoop;
     bool renderHooked;
+    int outputWidth, outputHeight;   // output size last asked for with EnsureDistortedOutput (0 = the calibrated image size); Apply() builds the lens output at it
+    int renderedIdeal;               // instance id of the ideal texture this camera last finished rendering into (0 = none)
     GameObject presenter;
     Canvas presenterCanvas;
     Camera presenterCamera;
@@ -101,6 +103,9 @@ public class CalibratedCamera : MonoBehaviour
     // True while the lens distortion is being rendered (Play mode, modelDistortion, non-zero coefficients).
     public bool DistortionActive => lens != null;
     public RenderTexture DistortedTexture => lens?.DistortedTexture;
+    // True once the camera has rendered into the current output. A freshly built output (first request for a size, a re-applied calibration) is empty until the
+    // camera's next render, and DistortedTexture read back before that is black.
+    public bool OutputRendered => lens != null && lens.IdealTexture != null && renderedIdeal == lens.IdealTexture.GetInstanceID();
 
     void OnEnable() { Apply(); }
 
@@ -205,7 +210,9 @@ public class CalibratedCamera : MonoBehaviour
 
         if (lens != null)
         {
-            EnsureDistortedOutput(imageWidth, imageHeight);
+            // At the size the output was last asked for (the recorder's capture size), not the calibrated one: this runs before the camera renders, so the recorder
+            // finds an output the camera is about to fill, instead of having to rebuild it after the camera has rendered (an empty texture: a black picture).
+            BuildOutput(outputWidth > 0 ? outputWidth : imageWidth, outputHeight > 0 ? outputHeight : imageHeight);
             HookRender();
         }
     }
@@ -220,9 +227,16 @@ public class CalibratedCamera : MonoBehaviour
         lens = null;
     }
 
-    // (Re)creates the output at outW x outH and points the camera at the matching ideal render.
-    // MultiViewRecorder calls this with its capture resolution.
+    // (Re)creates the output at outW x outH and points the camera at the matching ideal render. MultiViewRecorder calls this with its capture resolution, every
+    // frame. The size is remembered, so that a re-applied calibration (Inspector edit, re-imported JSON, the Editor's own OnValidate when Play starts) builds the
+    // output at that size again. Freshly built textures are empty until the camera renders into them: see OutputRendered.
     public void EnsureDistortedOutput(int outW, int outH)
+    {
+        outputWidth = outW; outputHeight = outH;
+        BuildOutput(outW, outH);
+    }
+
+    void BuildOutput(int outW, int outH)
     {
         if (lens == null) return;
         if (lens.DistortedTexture == null || lens.DistortedTexture.width != outW || lens.DistortedTexture.height != outH)
@@ -261,7 +275,17 @@ public class CalibratedCamera : MonoBehaviour
 
     void OnEndCameraRendering(ScriptableRenderContext context, Camera camera)
     {
-        if (camera == cam && lens != null) lens.Render();
+        if (camera != cam || lens == null) return;
+        NoteRendered();
+        lens.Render();
+    }
+
+    // Built-in pipeline: no end-of-camera callback, but this message reaches the scripts on the camera's own object (a render pipeline asset never sends it).
+    void OnPostRender() { if (lens != null) NoteRendered(); }
+
+    void NoteRendered()
+    {
+        if (lens.IdealTexture != null && cam.targetTexture == lens.IdealTexture) renderedIdeal = lens.IdealTexture.GetInstanceID();
     }
 
     IEnumerator RenderLoop()

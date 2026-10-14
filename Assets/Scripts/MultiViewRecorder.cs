@@ -35,6 +35,12 @@ using System.Threading.Tasks;
 // Frame alignment: all per-camera outputs share the same timestamp filename. A
 // frame is committed only after every camera's GPU readback succeeds, so the
 // JSON entry count equals the file count in each cam_N/rgb/ folder.
+//
+// Clocks: "timestamp" is the PC's real time since the first captured frame (a dataset replay: the dataset's own
+// time). "game_time" is the game's clock since the first frame, the one that drives the Animator; "animation_time"
+// is how long the first avatar's Animator has been in its current state. The videos (cam_N/video_*.avi) are on the
+// game's clock (the dataset's in a replay): constant frame rate, playing at the speed of the animation, so video
+// frame m shows the frame stamped at or before game_time = m / fps (listed in video_*.timeline.csv).
 [DefaultExecutionOrder(900)]
 public partial class MultiViewRecorder : MonoBehaviour
 {
@@ -125,7 +131,11 @@ public partial class MultiViewRecorder : MonoBehaviour
     public bool flipKeypointY = false;
 
     [Header("Overlay drawing")]
+    [Tooltip("Radius, in pixels of the captured picture, of the filled disc drawn on every joint of keyrgb/ and video_keyrgb (every pixel with dx^2 + dy^2 <= r^2, no anti-aliasing). " +
+             "HumanDatasetRecording's visualization/view_session.py paints its skeleton with the same disc at 720 px of picture height (--point-radius).")]
     public int pointRadiusPx = 4;
+    [Tooltip("Line thickness, in pixels, of the bones: but the brush is (2t + 1) pixels wide with t = (thickness - 1) / 2 in integer arithmetic, so 1 and 2 draw 1-pixel lines, 3 and 4 draw 3, 5 draws 5. " +
+             "The default 2 therefore draws 1-pixel lines, which is what view_session.py draws too (--line-width 1).")]
     public int lineThicknessPx = 2;
     public bool drawSkeleton = true;
     public Color bboxVisColor = new Color(1f, 1f, 0f, 1f);
@@ -136,8 +146,9 @@ public partial class MultiViewRecorder : MonoBehaviour
     public bool writeVideo = false;
     [Tooltip("Also write cam_N/video_keyrgb.avi, the video of the keypoint-overlay pictures. Independent of Write Keyrgb Overlay: you can have this video without the keyrgb/ images (and the images without the video).")]
     public bool videoIncludeKeyrgb = true;
-    [Tooltip("Frames per second written into the video. 0 = automatic: Frame Rate when Set Capture Framerate is on (every frame is captured, so the video plays at the speed of the scene), " +
-             "otherwise the average capture rate of the recording (frames can be dropped in real-time capture, so this keeps the video at real-time speed).")]
+    [Tooltip("Frames per second of the video. The video has a constant rate and plays at the speed of the game (of the dataset's own clock in a dataset replay): a frame is repeated where the capture was slower " +
+             "than this and left out where it was faster, so any value plays at the right speed (the image files keep every captured frame). " +
+             "0 = automatic: Frame Rate; 25 in a dataset replay, the rate visualization/view_session.py exports at, so the two videos of a dataset show the same pictures frame by frame.")]
     [Min(0f)] public float videoFrameRate = 0f;
     [Tooltip("When the session ends, also convert each video to H.264 .mp4 with ffmpeg (the .avi is kept). Runs in the background.")]
     public bool convertVideoToMp4 = false;
@@ -183,6 +194,7 @@ public partial class MultiViewRecorder : MonoBehaviour
         public GameObject captureCamGO;       // owns captureCam; destroyed on EndRecording
         public CalibratedCamera calib;        // non-null => calibrated K (+ lens distortion when DistortionActive)
         public bool sourceLostWarned;         // warn once when the image source disappears
+        public int unrenderedFrames;          // consecutive captures that found this calibrated camera's output not rendered into yet
         public string rgbDir, keyrgbDir, bboxDir, bboxVisDir;
         public MjpegAviWriter videoRgb, videoKey;   // the continuous videos of this camera (null = not written)
         public int width, height;
@@ -209,6 +221,7 @@ public partial class MultiViewRecorder : MonoBehaviour
     double _nextPacedCapture;           // real time at which the next paced capture is due
     bool _ffmpegWarned;
     int _skippedBackpressure;           // Update frames in which no capture started because the encoders were behind
+    bool _warnedUnrendered;             // said once per session that a capture waited for a camera's output
     bool acquired;
     bool _stopping;
     string autoStopReason = "";
@@ -217,6 +230,11 @@ public partial class MultiViewRecorder : MonoBehaviour
     Animator loopAnimator;
     int loopStateHash;
     float loopStartNormalized;
+
+    // The game's clock at the first captured frame (the videos' and game_time's zero), and the Animator whose position animation_time reports.
+    double _gameTimeStart;
+    Animator followAnimator;
+    static readonly List<AnimatorClipInfo> _clipInfos = new List<AnimatorClipInfo>();
 
     // ---------------- Inspector helpers ----------------
 
@@ -460,7 +478,7 @@ public partial class MultiViewRecorder : MonoBehaviour
             }
             if (writeVideo)
             {
-                double vfps = videoFrameRate > 0f ? videoFrameRate : (setCaptureFramerate ? frameRate : 0.0);   // 0: measured when the file closes
+                double vfps = VideoFps();
                 Action<string> vlog = m => Debug.LogWarning("[MultiViewRecorder] cam_" + idx1 + " " + m);
                 slot.videoRgb = new MjpegAviWriter(Path.Combine(camRoot, "video_rgb.avi"), slot.width, slot.height, vfps, vlog);
                 if (videoIncludeKeyrgb)                       // independent of Write Keyrgb Overlay: the video needs no keyrgb/ images
@@ -479,11 +497,16 @@ public partial class MultiViewRecorder : MonoBehaviour
         WriteCamerasJson();
 
         frameCounter = 0;
-        _mainThreadTicks = 0; _mainThreadCallbacks = 0; _skippedBackpressure = 0; _nextPacedCapture = 0.0; _ffmpegWarned = false;
+        _mainThreadTicks = 0; _mainThreadCallbacks = 0; _skippedBackpressure = 0; _nextPacedCapture = 0.0; _ffmpegWarned = false; _warnedUnrendered = false;
         recordingStartTime = -1.0;
+        _gameTimeStart = 0.0;
         jsonFirstFrame = true;
         lastCapturedUnityFrame = -1;
         SetupOneLoop();
+        followAnimator = ReplayActive ? _replayPlayer.animator : null;
+        if (followAnimator == null)
+            foreach (var a in avatars)
+                if (a != null && a.isActiveAndEnabled && a.runtimeAnimatorController != null) { followAnimator = a; break; }
         acquired = true;
         Debug.Log($"[MultiViewRecorder] Session started at {sessionPath} with {slots.Count} cameras");
     }
@@ -582,7 +605,17 @@ public partial class MultiViewRecorder : MonoBehaviour
 
     // ---------------- Video export ----------------
 
-    // Waits for the last frames, finishes the .avi file(s) (the frame rate is measured here when it was not fixed) and starts the .mp4 conversions.
+    // The frame rate of the videos: Video Frame Rate, or (0 = automatic) Frame Rate; in a dataset replay 25, the rate visualization/view_session.py exports at,
+    // so that the video of the replay and the video of the dataset have the same frame at every tick. Whatever it is, the video plays at the speed of its clock
+    // (MjpegAviWriter lays the frames on a grid of this rate).
+    double VideoFps()
+    {
+        if (videoFrameRate > 0f) return videoFrameRate;
+        if (ReplayActive) return DatasetReplayTiming.DefaultVideoFps;
+        return frameRate > 0 ? frameRate : 30.0;
+    }
+
+    // Waits for the last frames and finishes the .avi file(s) (and their .timeline.csv), then starts the .mp4 conversions.
     void CloseVideos()
     {
         foreach (var slot in slots)
@@ -593,7 +626,8 @@ public partial class MultiViewRecorder : MonoBehaviour
                 w.Close();
                 foreach (string f in w.Files)
                 {
-                    Debug.Log($"[MultiViewRecorder] cam_{slot.index1} video: {f} ({w.Frames} frames{(w.Skipped > 0 ? ", " + w.Skipped + " left out" : "")})");
+                    int leftOut = w.Skipped + w.Late;
+                    Debug.Log($"[MultiViewRecorder] cam_{slot.index1} video: {f} ({w.Frames} frames at {w.Fps:0.###} fps = {w.Frames / w.Fps:F1} s{(leftOut > 0 ? ", " + leftOut + " frames lost: failed encode, writer queue full or out of order" : "")})");
                     if (convertVideoToMp4) ConvertToMp4(f);
                 }
             }
@@ -702,12 +736,25 @@ public partial class MultiViewRecorder : MonoBehaviour
             int slotCount = slots.Count;
             if (slotCount == 0) yield break;
 
+            // A calibrated camera whose output was (re)built after the camera last rendered (the calibration was re-applied, the capture size changed) holds nothing yet:
+            // the camera draws into it from its next render on, and a readback now would be a black picture. Wait for the next frame; nothing is consumed (a replay poses
+            // the same picture again).
+            if (!OutputsRendered()) yield break;
+
             int idx = frameCounter++;
             if (recordingStartTime < 0.0) recordingStartTime = Time.realtimeSinceStartup;
             double relTime = Time.realtimeSinceStartup - recordingStartTime;
             string ts = relTime.ToString("F6", CultureInfo.InvariantCulture);
             if (ReplayActive) ReplayFrameIdentity(idx, out relTime, out ts);      // the dataset's own time and picture name
             lastCapturedUnityFrame = Time.frameCount;
+
+            // The clock of the videos: the one that drives the animation. The game's clock, not the PC's: it is what the Animator has played; under Set Capture
+            // Framerate it moves exactly 1 / Frame Rate a rendered frame, so a frame the encoders could not take leaves a gap that the video fills by repeating the
+            // previous frame instead of running ahead; it stops while the game is paused. In a dataset replay the clock is the dataset's own.
+            double gameNow = Time.timeAsDouble;
+            if (idx == 0) _gameTimeStart = gameNow;
+            double videoTime = ReplayActive ? relTime : gameNow - _gameTimeStart;
+            string clocksJson = FrameClocksJson(videoTime, AnimationSeconds());
 
             int kpCount = def.Count;
 
@@ -795,7 +842,7 @@ public partial class MultiViewRecorder : MonoBehaviour
             }
 
             // Build the JSON entry now, while world transforms are current.
-            string frameJson = BuildFrameJson(idx, relTime, ts,
+            string frameJson = BuildFrameJson(idx, relTime, ts, clocksJson,
                 allWorldPos, allWorldRot, allLocalPos,
                 camPosCvByCam, camRotCvByCam, imgPosByCam, imgDepthByCam, visByCam);
 
@@ -832,7 +879,7 @@ public partial class MultiViewRecorder : MonoBehaviour
                     }
                     hadError[ci] = 1;
                     if (Interlocked.Decrement(ref pendingReadbacks) == 0)
-                        CommitFrame(idx, relTime, ts, frameJson, allBytes, hadError, imgPosByCam, visByCam);
+                        CommitFrame(idx, relTime, videoTime, ts, frameJson, allBytes, hadError, imgPosByCam, visByCam);
                     continue;
                 }
                 slot.sourceLostWarned = false;
@@ -852,7 +899,7 @@ public partial class MultiViewRecorder : MonoBehaviour
                     {
                         int remaining = Interlocked.Decrement(ref pendingReadbacks);
                         if (remaining == 0)
-                            CommitFrame(idx, relTime, ts, frameJson, allBytes, hadError, imgPosByCam, visByCam);
+                            CommitFrame(idx, relTime, videoTime, ts, frameJson, allBytes, hadError, imgPosByCam, visByCam);
                         Interlocked.Add(ref _mainThreadTicks, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
                         Interlocked.Increment(ref _mainThreadCallbacks);
                     }
@@ -862,7 +909,33 @@ public partial class MultiViewRecorder : MonoBehaviour
         finally { _capturing = false; }
     }
 
-    void CommitFrame(int frameIndex, double timestamp, string ts, string frameJson,
+    const int MaxUnrenderedFrames = 5;
+
+    // False while a calibrated camera has not rendered into its (re)built output yet (CalibratedCamera.OutputRendered). A camera that never renders (its Camera component
+    // is switched off) is waited for only a few frames: after that its pictures are recorded black, with a warning, rather than holding the whole recording back.
+    bool OutputsRendered()
+    {
+        bool ready = true;
+        foreach (var slot in slots)
+        {
+            CalibratedCamera cc = slot.calib;
+            if (cc == null || !cc.DistortionActive) continue;
+            cc.EnsureDistortedOutput(slot.width, slot.height);      // asked again every frame: the calibration can be re-applied at any time
+            if (cc.OutputRendered) { slot.unrenderedFrames = 0; continue; }
+            slot.unrenderedFrames++;
+            if (slot.unrenderedFrames <= MaxUnrenderedFrames) ready = false;
+            else if (slot.unrenderedFrames == MaxUnrenderedFrames + 1)
+                Debug.LogWarning($"[MultiViewRecorder] cam_{slot.index1} ('{slot.cam.name}') has not rendered for {MaxUnrenderedFrames} frames (is its Camera component switched off?): its pictures are black.");
+        }
+        if (!ready && !_warnedUnrendered)
+        {
+            _warnedUnrendered = true;
+            Debug.Log("[MultiViewRecorder] a camera's output was just rebuilt (its calibration was re-applied or the capture size changed) and is still empty: this frame is not captured, the next one is.");
+        }
+        return ready;
+    }
+
+    void CommitFrame(int frameIndex, double timestamp, double videoTime, string ts, string frameJson,
                      byte[][] allBytes, int[] hadError,
                      Vector2[][][] imgPosByCam, bool[][][] visByCam)
     {
@@ -961,7 +1034,7 @@ public partial class MultiViewRecorder : MonoBehaviour
             var q = jpegQuality;
             // The video takes this frame's JPEG, in order: the writer waits on this task, whichever encode thread finishes first.
             TaskCompletionSource<byte[]> vidRgb = null;
-            if (slot.videoRgb != null) { vidRgb = new TaskCompletionSource<byte[]>(); slot.videoRgb.Append(vidRgb.Task, timestamp); }
+            if (slot.videoRgb != null) { vidRgb = new TaskCompletionSource<byte[]>(); slot.videoRgb.Append(vidRgb.Task, videoTime, frameIndex); }
             Interlocked.Increment(ref _inFlightEncodes);
             Task.Run(() =>
             {
@@ -995,7 +1068,7 @@ public partial class MultiViewRecorder : MonoBehaviour
                 var krFmt = imageFormat;
                 var krQ = jpegQuality;
                 TaskCompletionSource<byte[]> vidKey = null;
-                if (slot.videoKey != null) { vidKey = new TaskCompletionSource<byte[]>(); slot.videoKey.Append(vidKey.Task, timestamp); }
+                if (slot.videoKey != null) { vidKey = new TaskCompletionSource<byte[]>(); slot.videoKey.Append(vidKey.Task, videoTime, frameIndex); }
                 Interlocked.Increment(ref _inFlightEncodes);
                 Task.Run(() =>
                 {
@@ -1288,13 +1361,36 @@ public partial class MultiViewRecorder : MonoBehaviour
 
     // ---------------- JSON ----------------
 
-    string BuildFrameJson(int idx, double relTime, string ts,
+    // Extra clocks of a frame's JSON entry (ends with a comma and a new line), or nothing. game_time: the game's clock in seconds since the first captured
+    // frame (the videos' clock; a replay has the dataset's time instead). animation_time: seconds the first avatar's Animator has been in its current state,
+    // i.e. where in the clip the avatar is (a replay writes take_time instead).
+    string FrameClocksJson(double gameTime, double animationSeconds)
+    {
+        if (ReplayActive) return "";
+        var sb = new StringBuilder(96);
+        sb.Append("\n    \"game_time\": ").Append(F(gameTime)).Append(",");
+        if (animationSeconds >= 0.0) sb.Append("\n    \"animation_time\": ").Append(F(animationSeconds)).Append(",");
+        return sb.ToString();
+    }
+
+    // Seconds into the current state of the followed Animator (its clip's length x the state's normalized time), or -1 without one.
+    double AnimationSeconds()
+    {
+        Animator a = followAnimator;
+        if (a == null || !a.isActiveAndEnabled || a.runtimeAnimatorController == null) return -1.0;
+        AnimatorStateInfo st = a.GetCurrentAnimatorStateInfo(0);
+        a.GetCurrentAnimatorClipInfo(0, _clipInfos);
+        float length = _clipInfos.Count == 1 && _clipInfos[0].clip != null ? _clipInfos[0].clip.length : st.length;
+        return st.normalizedTime * (double)length;
+    }
+
+    string BuildFrameJson(int idx, double relTime, string ts, string clocksJson,
         Vector3[][] worldPos, Quaternion[][] worldRot, Vector3[][] localPos,
         Vector3[][][] camPosCv, Quaternion[][][] camRotCv,
         Vector2[][][] imagePos, float[][][] imageDepth, bool[][][] visible)
     {
         if (flatLayout)
-            return BuildFrameJsonFlat(idx, relTime, ts, worldPos, worldRot, localPos,
+            return BuildFrameJsonFlat(idx, relTime, ts, clocksJson, worldPos, worldRot, localPos,
                 camPosCv, camRotCv, imagePos, imageDepth, visible);
 
         int slotCount = slots.Count;
@@ -1306,6 +1402,7 @@ public partial class MultiViewRecorder : MonoBehaviour
         sb.Append("  {");
         sb.Append("\n    \"frame_index\": ").Append(idx).Append(",");
         sb.Append("\n    \"timestamp\": ").Append(F(relTime)).Append(",");
+        sb.Append(clocksJson);
         sb.Append(ReplayFrameJson(idx));
         // rgb_paths / keyrgb_paths as { "cam_N": "cam_N/rgb/<t>.<ext>" } dicts —
         // safer than positional arrays if a camera is dropped or reordered later.
@@ -1383,7 +1480,7 @@ public partial class MultiViewRecorder : MonoBehaviour
     // Single-camera flat frame entry, matching the KeypointsRecorder schema
     // (flat rgb_path/keyrgb_path, a per-frame "camera" block, and keypoints
     // with the camera-space fields inlined instead of a per_camera array).
-    string BuildFrameJsonFlat(int idx, double relTime, string ts,
+    string BuildFrameJsonFlat(int idx, double relTime, string ts, string clocksJson,
         Vector3[][] worldPos, Quaternion[][] worldRot, Vector3[][] localPos,
         Vector3[][][] camPosCv, Quaternion[][][] camRotCv,
         Vector2[][][] imagePos, float[][][] imageDepth, bool[][][] visible)
@@ -1398,6 +1495,7 @@ public partial class MultiViewRecorder : MonoBehaviour
         sb.Append("  {");
         sb.Append("\n    \"frame_index\": ").Append(idx).Append(",");
         sb.Append("\n    \"timestamp\": ").Append(F(relTime)).Append(",");
+        sb.Append(clocksJson);
         sb.Append(ReplayFrameJson(idx));
         sb.Append("\n    \"rgb_path\":\"rgb/").Append(ts).Append(ext).Append("\",");
         if (writeKeyrgbOverlay)

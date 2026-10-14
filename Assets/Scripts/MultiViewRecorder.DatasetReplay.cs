@@ -23,19 +23,29 @@ public partial class MultiViewRecorder
              "set to the instant of each picture, files named like the dataset's pictures. Max Frames still stops it early (0 = the whole dataset); " +
              "Record One Loop, Set Capture Framerate and the pacing are ignored. Needs Dataset Folder and an avatar whose Animator Controller plays the take.")]
     public bool replayDataset = false;
-    [Tooltip("The dataset's session folder (HumanDatasetRecording/Datasets/<session>): it holds the camera's pictures (<camera>/<unix time>.jpg) and rokoko_skeleton.jsonl.")]
+    [Tooltip("The dataset's session folder (HumanDatasetRecording/Datasets/<session>): it holds the camera's pictures (<camera>/<unix time>.jpg) and rokoko_local.jsonl (rokoko_skeleton.jsonl in sessions named before 2026-10-14).")]
     public string datasetFolder = "";
     [Tooltip("The sub-folder of the dataset with the pictures to match, e.g. cam107.")]
     public string datasetCamera = "cam107";
-    [Tooltip("take time = studio_timestamp + this. How far the clip the avatar plays starts before the live stream did; the dataset tools find it " +
-             "(python -m recording.studio_take --session <folder> --take <the .anim>): -1.947 s for test01_20261001_172733, the same for every export of that take.")]
-    public float takeTimeOffset = -1.947f;
-    [Tooltip("Seconds the camera's pictures lag behind the mocap (camera_delay_s of recalage/rokoko_corrected.jsonl). The picture taken at T shows the person as the mocap had them at T - delay.")]
+    [Tooltip("take time = studio_timestamp + this: the exported clip has its own second 0, where Studio's clock read -this (-1.943: clip second 0 = studio_timestamp 1.943 s). " +
+             "The dataset tools find it for the exact .anim by sliding the clip against the live stream until hips, head and hands coincide: " +
+             "visualization/view_session.py --studio-take ... prints 'For the Unity dataset replay: Take Time Offset ...' (also python -m recording.studio_take --session <folder> --take <the .anim>). " +
+             "Use the number printed for the take the avatar plays: test01_20261001_172733 gave -1.947 s for its first exports and -1.943 s for clip1310fix " +
+             "(the match error is flat to within 1 mm over +-20 ms, so a few ms between exports is noise). " +
+             "The video made by view_session.py draws the take at that offset, so a different one here puts the avatar that much off the skeleton there.")]
+    public float takeTimeOffset = -1.943f;
+    [Tooltip("Seconds the camera's pictures lag behind the mocap (camera_delay_s of recalage/rokoko_world.jsonl; view_session.py prints it as 'Camera Delay'). The picture taken at T shows the person as the mocap had them at T - delay.")]
     public float cameraDelay = 0.2f;
     [Tooltip("The state of the avatar's Animator Controller (layer 0) that plays the take, e.g. 'test01_20261001_172733 (1)_fixed'. Empty = the state it is in when the recording starts.")]
     public string replayAnimatorState = "";
     [Tooltip("Index of the first dataset picture to record (0 = from the start).")]
     [Min(0)] public int replayStartFrame = 0;
+    [Tooltip("The instant a picture stands for is when its IMAGE arrived, not the stamp of its file. A session recorded before 2026-10-07 saved the camera's latest picture " +
+             "at every poll, so about half of its files repeat the previous picture, and a repeat's stamp is up to ~180 ms later than its image: read at that stamp the avatar " +
+             "moves on while the real picture is frozen. On: a repeat gets the pose of the first file of its run (what the real camera showed, and what " +
+             "visualization/view_session.py draws by default: --picture-time content). Off: every file at its own stamp. No difference for a session without repeats. " +
+             "On reads the pictures once at the start (a second or two) to find the repeats.")]
+    public bool replayContentTime = true;
 
     DatasetReplayTiming _replayTiming;
     DatasetReplayPlayer _replayPlayer;
@@ -51,7 +61,7 @@ public partial class MultiViewRecorder
         _replayTiming = null; _replayPlayer = null; _replayHeld = 0;
         if (!replayDataset) return true;
 
-        _replayTiming = DatasetReplayTiming.Load(datasetFolder, datasetCamera, out string error);
+        _replayTiming = DatasetReplayTiming.Load(datasetFolder, datasetCamera, out string error, replayContentTime);
         if (_replayTiming == null) { Debug.LogError("[MultiViewRecorder] Dataset replay: " + error, this); return false; }
 
         Animator animator = null;
@@ -82,6 +92,9 @@ public partial class MultiViewRecorder
         Debug.Log($"[MultiViewRecorder] Dataset replay: {left} pictures of {datasetCamera} ({span:F1} s, {(left > 1 ? (left - 1) / span : 0.0):F2} per second) from picture {_replayFirst}; " +
                   $"take '{player.stateName}' = clip '{player.clipName}' ({player.length:F2} s) at studio_timestamp {takeTimeOffset:+0.000;-0.000} s, camera delay {cameraDelay:F3} s; " +
                   $"mocap clock slope {_replayTiming.clockSlope:F6} (scatter {_replayTiming.clockRmsMs:F1} ms over {_replayTiming.mocapFrames} frames). " +
+                  (_replayTiming.repeatedPictures > 0
+                      ? $"{_replayTiming.repeatedPictures} of {_replayTiming.Count} files repeat the previous picture: the avatar holds the pose of each picture's own time ({_replayTiming.repeatLagMs:F0} ms before the files' stamps on average). "
+                      : replayContentTime ? "No picture repeats the previous one. " : "Replay Content Time is off: every file at its own stamp. ") +
                   $"Picture {_replayFirst} is the take at {_replayTiming.TakeTime(_replayFirst, cameraDelay, takeTimeOffset):F3} s" +
                   (_replayHeld > 0 ? $"; {_replayHeld} pictures fall outside the usable part of the clip ({before} before {DatasetReplayPlayer.FirstUsableSeconds:F1} s, {after} after its end): its first / last pose is shown for them." : "."), this);
         if (maxFrames > 0 && maxFrames < left)
@@ -127,6 +140,7 @@ public partial class MultiViewRecorder
         var sb = new StringBuilder(160);
         sb.Append("\n    \"dataset_picture\": ").Append(k).Append(",");
         sb.Append("\n    \"dataset_time\": ").Append(_replayTiming.times[k].ToString("F6", CultureInfo.InvariantCulture)).Append(",");
+        sb.Append("\n    \"content_time\": ").Append(_replayTiming.PictureTime(k).ToString("F6", CultureInfo.InvariantCulture)).Append(",");
         sb.Append("\n    \"take_time\": ").Append(_replayTiming.TakeTime(k, cameraDelay, takeTimeOffset).ToString("F6", CultureInfo.InvariantCulture)).Append(",");
         return sb.ToString();
     }
@@ -141,7 +155,8 @@ public partial class MultiViewRecorder
         var inv = CultureInfo.InvariantCulture;
         return "  \"dataset_replay\": { \"folder\": \"" + folder + "\", \"camera\": \"" + datasetCamera + "\", \"first_picture\": " + _replayFirst.ToString(inv) +
                ", \"pictures\": " + _replayTiming.Count.ToString(inv) + ", \"take_time_offset\": " + takeTimeOffset.ToString("R", inv) +
-               ", \"camera_delay\": " + cameraDelay.ToString("R", inv) + ", \"clock_slope\": " + _replayTiming.clockSlope.ToString("R", inv) +
+               ", \"camera_delay\": " + cameraDelay.ToString("R", inv) + ", \"picture_time\": \"" + (_replayTiming.useContentTime ? "content" : "file") +
+               "\", \"repeated_pictures\": " + _replayTiming.repeatedPictures.ToString(inv) + ", \"clock_slope\": " + _replayTiming.clockSlope.ToString("R", inv) +
                ", \"clock_intercept\": " + _replayTiming.clockIntercept.ToString("R", inv) + ", \"animator_state\": \"" + state + "\", \"clip\": \"" + clip +
                "\", \"clip_length\": " + _replayPlayer.length.ToString("R", inv) + " },\n";
     }
