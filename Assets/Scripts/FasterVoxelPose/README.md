@@ -16,7 +16,10 @@ cameras of the scene and shows what it finds, live:
   stepping by **one frame, ten frames, one second or one estimate** (the scene is recorded 30 times a second, not only when an
   estimate is made),
 * a **phantom filter**: skeletons of people who are not there are taken out (see below),
-* the poses as plain C# objects (`FvpPerson`) for whatever they will drive next (Bulles, PontRoulant…).
+* the poses as plain C# objects (`FvpPerson`) for whatever they will drive next (Bulles, PontRoulant…),
+* a **lean copy** (`FasterVoxelPoseLite`) with none of the displays, and a **follower** (`PoseEstimateFollower`) that moves
+  `CapsuleOperatorPete` with the operator as the model sees him, in real time, with the measurements of how well it keeps up
+  (see *Real time: the lean estimator and the capsule follower*).
 
 ## Quick start
 
@@ -387,6 +390,129 @@ training labels (see Troubleshooting). To repeat the table: `python Server~/vitp
 `vitpose` environment, then `Server~/lift_eval/run.ps1 -Json lift_input.json` (it compiles the lifter with the Roslyn that ships
 with the Unity editor and prints the same figures, for all the views, every three and every pair).
 
+## Real time: the lean estimator and the capsule follower
+
+**The question:** can `CapsuleOperatorPete` follow the operator using nothing but what the cameras see, fast enough to matter? Three pieces answer it:
+
+| | |
+|---|---|
+| `FasterVoxelPoseLite` | the same Faster-VoxelPose server and models, with everything that is for *looking at* the model taken out and the loop from picture to people shortened |
+| `PoseEstimateFollower` (+ `OperatorTrack`) | puts an object where the operator is **now**: which person is the operator, a filter, and an extrapolation over the pipeline's delay |
+| `IPoseSource` | what the follower reads: the lean estimator, `FasterVoxelPoseLive` or `ViTPoseLive` (lifted to 3D). *Source* = Auto picks the lean one while it runs, else the full one, else ViTPose |
+
+### Set-up
+
+1. **Tools ▸ FasterVoxelPose ▸ Real-time operator capsule (lean estimator + follower on CapsuleOperatorPete)** creates `FasterVoxelPoseLite` (cameras, volume and server settings copied from the `FasterVoxelPose` object, so the server reuses its grids), puts a `PoseEstimateFollower` on `CapsuleOperatorPete` and wires its *Truth Avatar* to `OperatorPete`'s Animator. The scene is marked as changed, not saved. **Attach pose follower to the selected object** puts one on any other capsule (followers never take the same person).
+2. Press **Play**. The server answers one client at a time, so the lean estimator switches the full `FasterVoxelPoseLive` off for that session (*Take Over From Full Component*; the scene is not changed). Disable the lean one to get the displays, overlays and the hub back.
+3. The capsule goes to the nearest person the model confirms (two estimates in a row), follows him, goes **grey** while it does not know where he is, and the Console prints a report when Play stops (the Inspector shows it live; *Print report* any time).
+
+**The real operator never moves the capsule.** *Truth Avatar* is only read to measure the capsule against (the twin knows the truth; a real installation would not).
+
+**Hidden from the pose cameras (on by default).** In the twin the model reads *renders* of the scene, so a capsule drawn around the operator is in the very pictures it estimates from: an opaque one hides him completely (measured in the scratch scene with an opaque capsule: the model found him in 15-23 % of the estimates, against 100 % once the capsule was hidden from its cameras), red glass tints him, and a real camera would never see it. The follower therefore switches its renderers off while a camera that feeds the model renders, and on for every other camera (Game and Scene view, other displays). Layers and physics are untouched. Untick *Hide From Pose Cameras* if you want the capsule on those cameras' displays and accept what it does to the estimates.
+
+### What the lean estimator drops, and what it does differently
+
+| | `FasterVoxelPoseLive` | `FasterVoxelPoseLite` |
+|---|---|---|
+| overlays on the displays, transport bar, status card, hub tabs, 2D heatmaps (and asking the server for them) | yes | no |
+| history, rewind, a snapshot of the scene's moving objects 30 times a second, ground truth read from the rigs at every capture, full-resolution copies of the images | yes | no |
+| image read-back | async when Unity runs above 25 fps (the result arrives 2-3 rendered frames later) | **blocking** by default: read in the frame the picture is taken (the main thread waits for the GPU: 3 ms when it is idle) |
+| answer -> next picture | the answer is used in the next `Update`, the next picture is taken at the end of that frame | the answer is used at the end of the frame it arrives in and the next picture is taken in that same frame |
+| vertical flip of the picture | row by row on the CPU | by the GPU while it downscales (checked against a known image) |
+| Unity's frame-rate cap | fixed (`Live Frame Rate`) | `Live Frame Rate` is the most; **lowered by itself** when the server's own time per frame goes over `Slow Server Ms` and tried higher again later (see below) |
+| what it hands out | `People`, `FrameEstimated`, `IPoseSource` | `People`, `EstimateReady`, `IPoseSource`, `BuildReport()` |
+
+The network is the same and so is the server, so **what the lean one cannot do is make the model itself faster**: 30 ms of network (34 ms for the whole answer) for 3 views on an idle GPU, whatever the client. What it removes is everything around it.
+
+### How the capsule follows
+
+* **The followed point** is the middle of neck, shoulders and hips (*Anchor* Torso; MidHip, Neck, AllJoints also there): the joints the network gets best, and the body's axis. Only the position on the floor is followed; the capsule keeps its authored height.
+* **A body, not an id.** The list of people is not clean (see the measurements): a person can come twice, a second fading skeleton on the same body for a few estimates (seen in the scratch Unity run below: the old id turned into a weak duplicate and the sharp skeleton got a new one), the model numbers him again each time it loses and finds him, and now and then a skeleton stands where nobody is. So skeletons closer than 0.35 m are one body (the sharper one stands for it), the followed id keeps it unless another is clearly sharper, a new body replaces him only after the same place has been seen in two estimates in a row, and a body that stood 0.6 m or more away from him at the same time is **somebody else** and is only taken if it is practically on the prediction (a neighbour walking past while his estimate drops out is not mistaken for him). `OperatorTrack` has the rules: plain C#, no scene code, and `Server~/track_eval/run.ps1` runs its scenarios (and the replay of recorded estimates below) outside Unity.
+* **A Kalman filter** per horizontal axis (position and velocity). An estimate describes the scene as it was when the pictures were taken; every rendered frame the capsule is put where the filter says he is *now*: the filtered position moved on by his velocity x the age of the estimate (at most *Max Predict Seconds*). One bad estimate has a bounded pull (an innovation counts as at most 3 sigmas, and the velocity cannot change faster than a person accelerates).
+* **When the operator is not seen**: after *Hold Seconds* (1 s) without a match the capsule keeps its last position, goes grey (*Tint When Not Tracking*), and `trackLost` fires; a body that shows up near it is taken back (`trackAcquired`); after *Forget Seconds* (8 s) it searches again around itself. *Log Transitions* prints one line each time, with who was in the last estimate and where the filter expected him.
+* Settings you may want: *Acquire Radius* (only people within this of the capsule can be taken; 0 = nearest), *Confirm Estimates*, *Measurement Noise* (0.06 m; the measured scatter is 3-4 cm), *Maneuver Accel* (1.5 m/s²: larger follows turns faster and smooths less), *Smooth Time*, *Lost Behaviour* (hold or go home).
+
+### Is it real time? What was measured
+
+All of it is on this laptop (RTX 5000 Ada). The first two tables are the recorded session (`MultiViewSession_20260430_172237`: renders of this scene, two people, one of them walking 56 m in 36 s); the last two are a scratch Unity project (the three cameras' own calibration, `PeteCharacter` walking a figure-8 at 1.2 m/s with a 3 s stop, real server, Unity stepped at exactly real time). **None of it is real camera footage, and the scratch scene is much lighter than yours** (see the last table for what a heavy scene does).
+
+**1. How good is the point the capsule follows?** (`python Server~/capsule_eval.py --spawn --views 1,2,3 --csv x.csv`; matched to the avatars' rigs, same phantom rule as live)
+
+| | 3 views (like the live scene) | 4 views |
+|---|---|---|
+| torso point vs truth, horizontally (1,089 / 1,177 matched people) | median **3.5 cm**, p95 6.9, p99 8.5, max 75 | median 3.7, p95 8.0, p99 10.7, max 13.7 |
+| change from one estimate to the next (jitter) | median 0.7 cm, p95 2.7 | median 0.7, p95 2.5 |
+| constant offset / scatter around it | 1 cm / 2-4 cm | 2 cm / 3 cm |
+| people with a kept estimate (of 1,216) | **90 %** | **97 %** |
+| ghosts left after the 2D-support rule | 29 estimates, 5 % of frames (44 % of frames before the rule) | 0 (14 % before) |
+| server time per frame, whole answer (network alone) | 34 ms, p95 38 (30 ms) | 40 ms, p95 45 (35 ms) |
+
+The per-joint error of the whole body (150-160 mm MPJPE) is much worse than this: the torso is what the network finds best. **Dropouts, not accuracy, are what a follower has to survive**: with 3 views the walker had no estimate in 21 % of the frames (in gaps of 1-2 s) and 18 real people were taken for phantoms by the 2D-support rule. The people of this session move: 1.55 m/s on average for the walker, 2 m/s at the 95th percentile of a frame step.
+
+**2. The real estimates through the tracker, with a delay put in** (`replay` of that CSV with a latency and an estimate rate; cm between the capsule axis and the person's real torso point, 4 views, the two people together, 0.0 % of the time on the wrong person)
+
+| estimates | delay | capsule: median / p95 | the newest estimate as it is: median / p95 |
+|---|---|---|---|
+| 9.9 /s | 100 ms | 4.5 / 18.5 | 8.7 / 32.7 |
+| 9.9 /s | 250 ms | 6.0 / 34.2 | 13.1 / 56.5 |
+| 6.6 /s | 150 ms | 5.3 / 26.3 | 11.5 / 48.1 |
+| 3.3 /s | 350 ms | 6.5 / 64.9 | 5.1 / 98.9 |
+
+The prediction roughly halves the median and cuts p95 by 40-45 % up to a quarter of a second of delay. At 3.3 estimates a second it no longer helps the median (6.5 against 5.1 cm: half of the samples are the person who hardly moves, and the raw estimate is already right for him) but still cuts the tail from 99 to 65 cm; the person has moved too far between two estimates for any prediction to hold it tight.
+
+**3. End to end in Unity, paced at real time** (50 s, Pete walking, three calibrated cameras, the capsule following; `inside` = the operator's body, torso axis + 25 cm, inside the 0.5 m capsule)
+
+| | Unity | estimates /s | capture -> people | capsule: median / p95 / max | inside |
+|---|---|---|---|---|---|
+| **lean, blocking read-back** | 30 fps | 12.4 | **70 ms** (p95 100) | 4.5 / 11.0 / 21.5 cm | 100 % |
+| lean, async read-back | 30 fps | 5.4 | 170 ms (p95 205) | 6.0 / 24.0 / 38.5 cm | 96 % |
+| `FasterVoxelPoseLive` as it is | 30 fps | 5.8 | 165 ms (p95 200) | 5.5 / 22.5 / 38.2 cm | 97 % |
+| **lean, blocking** | 60 fps | 15.0 | **70 ms** (p95 85) | 5.0 / 11.0 / 17.5 cm | 100 % |
+| `FasterVoxelPoseLive` as it is | 60 fps | 9.0 | 115 ms (p95 130) | 5.5 / 16.0 / 23.8 cm | 100 % |
+| ViTPose lifted to 3D (follower *Source* = ViTPose, FasterVoxelPose capturing for it and running too) | 30 fps | 4.3 | 230 ms (p95 265) | 7.5 / 34.0 / 50.3 cm | 87 % |
+
+At the same Unity frame rate the lean path is about **2.4 times lower in latency and twice the update rate** (30 fps), which is what turns into 11 cm instead of 22 cm at p95. ViTPose (YOLOv8 + ViTPose-B on every view, then triangulated) is the slow one here, 230 ms, and shares the GPU with FasterVoxelPose which has to run to capture the frames for it; the prediction still brings its raw estimate (37 cm median behind the walker) down to 7.5 cm. The capture itself costs 3 ms of the main thread in this light scene (see the next table for a heavy one); the component 0.04 ms per frame, the full one 0.2-0.5 ms per frame. The 70 ms is the server (56-58 ms in this loop), the capture (3 ms), the socket (0.5 ms) and the time until the end of the frame at which the answer is used. Only the *newest* picture is ever sent, so nothing queues.
+
+**4. What a heavy scene does: the GPU is shared.** The same test with an in-scene GPU load (alpha quads drawn into a 4096 x 4096 target every frame) standing in for a heavy scene:
+
+| load (lean estimator unless noted) | Unity | server time per frame | capture stall | estimates /s | capture -> people | capsule: median / p95 | inside | operator lost |
+|---|---|---|---|---|---|---|---|---|
+| none | 30 fps | 58 ms | 3 ms | 12.4 | 70 ms | 4.5 / 11.0 cm | 100 % | 0 s |
+| 150 quads | 30 fps | 75 ms | 33 ms | 7.4 | 135 ms | 5.0 / 17.0 cm | 99.8 % | 0 s |
+| 150 quads | **60 fps** | **652 ms** | 45 ms | 2.1 | 615 ms | 152 / 392 cm | 6 % | 37 s |
+| 300 quads | **30 fps** | **486 ms** | 61 ms | 1.6 | 565 ms | 73 / 472 cm | 18 % | 14 s |
+| 300 quads | 20 fps | 90 ms | 55 ms | 8.2 | 150 ms | 5.5 / 22.0 cm | 97 % | 0 s |
+| 300 quads | 15 fps | 56 ms | 57 ms | 7.4 | 135 ms | 4.5 / 16.0 cm | 99.6 % | 0 s |
+| 300 quads, `FasterVoxelPoseLive` | 30 fps | (not measured) | (not measured) | 1.4 | 665 ms | 100 / 456 cm | 7 % | 29 s |
+
+(The *capture stall* is the blocking read-back waiting for the GPU to finish the frame's work: 3 ms when the GPU is idle, 30-60 ms when Unity keeps it busy. It is time the main thread would otherwise spend waiting for the frame cap, not extra work, but it is why a heavy scene shows it.)
+
+**Past a point the server does not slow down, it collapses** (58 ms to 486-652 ms), and the capsule loses the operator. Holding Unity's frame rate down gives the GPU back: 20 or 15 fps took the same heavy scene from 486 ms to 90 or 56 ms. This is what the server logs of your own live runs show (214-664 ms), so for your real scene (16 cameras, 1,360 renderers) **expect to be on the wrong side of this cliff unless Unity's frame rate is held down or the scene is made lighter** (fewer rendering cameras, a smaller Game view, lower camera resolutions). The lean estimator's governor does the first by itself: it lowers the cap while the server's own time is over *Slow Server Ms* (150 ms), and tries a slightly higher one every 12 s of comfortable answers, with an exponential back-off after a try that failed (tested against a simulated GPU with this cliff: heavy scene -> settles on a cap, light scene -> stays at 30, load goes away -> climbs back to 30).
+
+**What this does and does not show.** It shows that the *method* works and where it breaks, with the delays measured here. It does not show how the model does on real photographs of the real lab (never measured: every image so far is a render of this scene), nor what your scene costs the GPU (measure it: the Inspector shows the server's time and the cap). It is not a safety function: the tails (p99 of 30-60 cm with the dropouts of 3 views, ghosts, a collapsed server, a lost track) are what a protective system with real consequences would have to be designed around.
+
+### Reading the report
+
+When Play stops, or *Print report*:
+
+```
+PoseEstimateFollower on 'CapsuleOperatorPete' - FasterVoxelPoseLite: 763 estimates, 12.4/s
+  latency, capture -> people in hand:  median 70 ms, p95 100, max 212
+  age of what the capsule is placed from (latency + wait for the next estimate): median 105 ms, p95 170, max 233
+  time: following 60.0 s, searching 0.0 s, operator lost 0.0 s; acquired 1x, lost 0x
+  capsule axis vs the real operator's torso:  median 4.5 cm, p95 11.5, p99 14.5, max 17.4
+  the newest estimate as it is, no filter, no extrapolation:  median 12.0 cm, p95 20.5, p99 22.5, max 30.3
+  operator's body (axis + 0.25 m) inside the capsule (radius 0.50 m): 100.0 % of 1801 frames since the first lock;
+  radius needed for 99 % of them: 0.40 m
+  of the session, the capsule knew where the operator was 100.0 % of the time
+```
+
+(That is the scratch scene's report. `FasterVoxelPoseLite` prints a second block when Play stops: the same latency broken into capture / socket / server time, the server's stages, and the cap Unity is held to.)
+
+*Radius needed for 99 %* is what to compare with the capsule's real radius (0.5 m, the yellow one 0.6 m): if it is larger, the protection leaks that often at the measured delay.
+
+**If the capsule does not follow:** *searching* for ever - nobody confirmed near it (raise *Acquire Radius*, check *Min Score* / the phantom filter, check the volume), or the capsule is on the cameras' pictures (*Hide From Pose Cameras*); *lost* often - read the transition lines (who was in the estimate), look at estimates per second and at the server's time (a server over 150 ms means the GPU is saturated); *another person* - raise *Confirm Estimates*, set *Acquire Radius*; the **server is busy** - FasterVoxelPoseLive is enabled on the same port (tick *Take Over From Full Component*).
+
 ## How it works
 
 ```
@@ -441,6 +567,12 @@ fvp.FrameEstimated += frame =>              // every new estimate, main thread
 
 `FrameEstimated` is not raised while browsing history; check `IsLive` before driving anything physical from `People`.
 
+To follow people without caring which model made them, read an `IPoseSource` (implemented by `FasterVoxelPoseLite`, `FasterVoxelPoseLive` and
+`ViTPoseLive`): `TryGetPose(out PoseSample s)` gives the people of the newest estimate, the scene time they were captured at (on the source's
+`PoseClockNow`, which stops with `Time.timeScale = 0`), a serial that changes with every estimate, and the pipeline latency. The lean estimator
+also raises `EstimateReady` (in the frame the answer arrives in) and has `BuildReport()`. `OperatorTrack` (which of the people is *the* operator,
+and where he is now) can be used on its own; `PoseEstimateFollower` is the Unity part around it.
+
 ## Files
 
 | | |
@@ -454,6 +586,12 @@ fvp.FrameEstimated += frame =>              // every new estimate, main thread
 | `ViTPoseLive.cs`, `ViTPoseLive.Visual.cs`, `ViTPoseResult.cs`, `FvpModelPanels.cs` | ViTPose: link, frames, results, ground-truth comparison, overlay, status card, heatmaps |
 | `Server~/vitpose_server.py`, `Server~/vitpose_selftest.py` | the ViTPose server (YOLOv8 + ViTPose-B) and its replay test |
 | `Server~/fvp_diagnose.py` | splits the error of a recorded session into 2D detector, 3D result and number of views |
+| `FasterVoxelPoseLite.cs`, `FasterVoxelPoseLite.Capture.cs`, `FvpLiveStats.cs`, `FvpFrameRateGovernor.cs` | the lean estimator (capture, link, people, report), its histograms, and the governor that holds Unity's frame rate where the server stays fast |
+| `PoseSource.cs`, `*.PoseSource.cs` | `IPoseSource` and its three implementations (new partial parts of `FasterVoxelPoseLive` and `ViTPoseLive`, nothing existing was edited) |
+| `PoseEstimateFollower.cs`, `OperatorTrack.cs` | moves an object with the operator (hidden from the pose cameras, tinted when lost, with measurements), and the logic behind it: bodies, Kalman filter, loss and re-acquisition |
+| `Editor/FasterVoxelPoseLiteInstaller.cs`, `Editor/*Editor.cs` | the Tools menu items for the lean estimator and the follower, its server pre-warm hook, the two Inspectors |
+| `Server~/capsule_eval.py` | replays a recorded session through the server and measures the torso point (error, jitter, recall, ghosts, timing); `--csv` keeps the real estimates |
+| `Server~/track_eval/` | the follower's logic outside Unity: `run.ps1 -What scenarios \| governor \| replay -Csv x.csv` |
 | `FvpClient.cs`, `FvpProtocol.cs` | socket link and wire format (shared with the server) |
 | `FvpCameraModel.cs` | camera model + the projection behind the overlay (UnityEngine-free) |
 | `FvpHistory.cs`, `FvpSkeleton.cs` | frames / people / tracker, joint data |
