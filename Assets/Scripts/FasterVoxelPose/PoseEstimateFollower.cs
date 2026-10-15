@@ -6,25 +6,27 @@ using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.Rendering;
 
-// Moves this object with the operator as the pose estimators SEE him, never as the scene knows him: the position comes from the people
+// Moves this object with the operator as the pose estimators SEE them, never as the scene knows them: the position comes from the people
 // a pose model finds in the camera images (FasterVoxelPoseLite, FasterVoxelPose or ViTPose), so it works exactly as it would with
 // real cameras. Put it on CapsuleOperatorPete (Tools > FasterVoxelPose > Real-time operator capsule does it).
 //
 //   cameras --> pose model (people, ~100-300 ms old) --> OperatorTrack (which one is the operator, filter, extrapolation) --> this object
 //
 // Each estimate describes the scene as it was when the images were taken. The follower keeps a Kalman filter on the operator's
-// horizontal position and, every rendered frame, puts the capsule where the filter says he is NOW (the filtered position moved on by his
+// horizontal position and, every rendered frame, puts the capsule where the filter says the operator is NOW (the filtered position moved on by the operator's
 // velocity x the age of the estimate), so a walking operator is not trailed by the full pipeline latency. If the estimates stop for
-// `holdSeconds` the capsule keeps its last position and shows it (tint, trackLost), and takes the operator back when he reappears.
+// `holdSeconds` the capsule keeps its last position and shows it (tint, trackLost), and takes the operator back when they reappear.
 //
 // The scene's real operator is never used to move anything. Give `truthAvatar` and the follower only MEASURES against it (in the
 // twin the truth is known): the error of the capsule, of the raw latest estimate, the latency, and how often the operator's body was
 // inside the capsule. That is the answer to "can this be done from the images in real time": see BuildReport / the Inspector.
 //
-// The height of the capsule is not followed (it stays where it was authored, standing on the floor); only the position on the floor.
+// The position follows the operator on the floor plane. Its SIZE follows the detected body: with Fit To Person on, the radius and the two
+// tips are those of the smallest capsule that has the whole detected skeleton inside, whatever the pose (a hand held out or up, sitting,
+// crouching), computed from the pose model's joints alone: see PoseEstimateFollower.Fit.cs and FvpCapsuleFit.
 [DisallowMultipleComponent]
 [DefaultExecutionOrder(1000)]   // after the Animators, RokokoFramePlacement and the other LateUpdates: the truth is read for the frame the cameras saw
-public sealed class PoseEstimateFollower : MonoBehaviour
+public sealed partial class PoseEstimateFollower : MonoBehaviour
 {
     public enum SourceChoice { Auto = 0, FasterVoxelPoseLite = 1, FasterVoxelPose = 2, ViTPose = 3 }
 
@@ -57,10 +59,26 @@ public sealed class PoseEstimateFollower : MonoBehaviour
     [Tooltip("Added to the followed point on the floor plane (world X, Z), metres.")]
     public Vector2 offset = Vector2.zero;
 
+    [Header("Size of the capsule")]
+    [Tooltip("Size this object to the person it follows, so that the whole body (a hand held out or up, sitting, crouching) is inside whatever the pose. The size is a function of the skeleton the pose model detected and nothing else: not the scene's real operator (Truth Avatar only measures), not the scene's colliders. The capsule's axis stays on the followed point. Works on an upright capsule (a CapsuleCollider along Y, or Unity's capsule mesh); children (a bigger outer bubble) scale with it. Off: the size stays as authored. While nobody is followed it goes back to the authored size.")]
+    public bool fitToPerson = true;
+    [Tooltip("Metres of clearance around every joint, on top of how far the body reaches around it (14 cm around a wrist, 15 around an ankle, 17 around the nose): the error of the estimate and of the capsule's place, and the time between two estimates.")]
+    [Range(0f, 0.4f)] public float fitMargin = 0.12f;
+    [Tooltip("The capsule is never narrower than this.")]
+    [Range(0.1f, 1f)] public float fitMinRadius = 0.30f;
+    [Tooltip("... and never wider than this: a joint of a bad estimate far from the body must not make a room-sized bubble. A body that needs more is flagged (Clamped, in the report) and sticks out.")]
+    [Range(0.5f, 3f)] public float fitMaxRadius = 1.5f;
+    [Tooltip("Tip to tip, the least the capsule is tall (a person lying down).")]
+    [Range(0.3f, 2f)] public float fitMinHeight = 0.6f;
+    [Tooltip("The capsule grows in the frame a limb goes out, and shrinks over this long when it comes back (a wrist that flickers in and out of the estimate must not make the capsule flicker). 0 = shrinks at once.")]
+    [Range(0f, 3f)] public float fitShrinkSeconds = 0.5f;
+    [Tooltip("On (default): both tips come from the detected skeleton, its lowest and highest points: the size is then a function of the skeleton alone (somebody on a platform or jumping gets a capsule that follows). Off: the lower tip is never higher than the height this object was authored at (a constant of the scene, not of the skeleton), so the capsule stands on the floor even if the detected feet are a few centimetres high.")]
+    public bool fitBottom = true;
+
     [Header("Real time")]
-    [Tooltip("Put the object where the operator is NOW: the filtered position moved on by his velocity x the age of the estimate. Off: where the newest estimate had him (smoothed).")]
+    [Tooltip("Put the object where the operator is NOW: the filtered position moved on by their velocity x the age of the estimate. Off: where the newest estimate had them (smoothed).")]
     public bool predictAhead = true;
-    [Tooltip("The most the velocity is extrapolated, seconds. Bounds the damage when he stops and the estimates are late.")]
+    [Tooltip("The most the velocity is extrapolated, seconds. Bounds the damage when the operator stops and the estimates are late.")]
     [Range(0.05f, 2f)] public float maxPredictSeconds = 0.6f;
     [Tooltip("Metres, 1 sigma of one estimate's horizontal position. Bigger = trusts the estimates less, smoother, slower to follow.")]
     [Range(0.01f, 0.5f)] public float measurementNoise = 0.06f;
@@ -72,9 +90,11 @@ public sealed class PoseEstimateFollower : MonoBehaviour
     [Range(0.5f, 8f)] public float maxSpeed = 3f;
 
     [Header("When the operator is not seen")]
-    [Tooltip("Without an estimate of him for this long the track is lost: the object stops where it is (or goes home) and shows it.")]
+    [Tooltip("Without an estimate of the operator for this long the track is lost: the object stops where it is (or goes home) and shows it. Counted from the arrival of the last estimate that had them, so the delay of the pipeline does not count as time they were missing.")]
     [Range(0.2f, 5f)] public float holdSeconds = 1f;
-    [Tooltip("Lost for this long: forget him and look for someone again around the object.")]
+    [Tooltip("... and at least this many intervals between two estimates: when the pipeline is slow (a loaded GPU: 2 estimates a second) one missing estimate is not a lost operator. 0 = only Hold Seconds.")]
+    [Range(0f, 6f)] public float holdIntervals = 2.5f;
+    [Tooltip("Lost for this long: forget the operator and look for someone again around the object.")]
     [Range(1f, 60f)] public float forgetSeconds = 8f;
     public LostBehaviour lostBehaviour = LostBehaviour.HoldLastPosition;
     [Tooltip("Tint the renderers of this object and its children while it does not know where the operator is (searching or lost), so a capsule that has stopped following is not mistaken for one that has.")]
@@ -84,8 +104,25 @@ public sealed class PoseEstimateFollower : MonoBehaviour
     public UnityEvent trackLost = new UnityEvent();
 
     [Header("In the digital twin")]
-    [Tooltip("The pose model reads the images of the cameras, and in the twin those are renders of the scene: a capsule drawn around the operator would hide him from them (an opaque one makes the model lose him completely, glass tints him) and a real camera would never see it. So this object's renderers are switched off while a camera that feeds the model renders, and on for every other camera (the Game and Scene views, other displays). Layers and physics are untouched.")]
+    [Tooltip("The pose model reads the images of the cameras, and in the twin those are renders of the scene: a capsule drawn around the operator would hide the operator from them (an opaque one makes the model lose the operator completely, glass tints them) and a real camera would never see it. So this object's renderers are switched off while a camera that feeds the model renders, and on for every other camera (the Game and Scene views, other displays). Layers and physics are untouched.")]
     public bool hideFromPoseCameras = true;
+    [Tooltip("The displays of the pose cameras then show no capsule (that is the point of hiding it from them), so its outline is drawn over those displays instead: a screen overlay, not part of the camera images the model, the recorder or a capture of the camera read. Only used while Hide From Pose Cameras is on.")]
+    public bool drawOnPoseCameras = true;
+    [Tooltip("RenderedAfterwards: the real objects are rendered for each pose camera by a second, hidden camera that sees nothing else, never into the picture the model reads, through the same projection and lens distortion, and shown over the display: the real object (colours, glass, lighting, tint), minus being hidden behind objects in front of it. Outline: a flat silhouette per piece in its material's colour (nothing is rendered). A camera that cannot render it afterwards (not lens-distorted, no render pipeline) shows the outline.")]
+    public BubbleDisplay bubbleDisplay = BubbleDisplay.RenderedAfterwards;
+    [Tooltip("Resolution of that second render relative to the camera's output: 0.5 is a quarter of the pixels, plenty for a translucent bubble and a quarter of the cost.")]
+    [Range(0.25f, 1f)] public float bubbleResolution = 0.5f;
+    [Tooltip("Puts the premultiplied bubble over the picture (Hidden/FasterVoxelPose/PremultipliedOver). Found by name when empty; referenced here so that a build includes it.")]
+    public Shader bubbleShader;
+    [Tooltip("Objects that hide the bubble behind them, as they do in the Scene view: the operator inside it (whose body hides the far side of the glass), a box in front of it. They are drawn depth-only when the bubble is rendered afterwards; anything not listed does not hide it. Empty = the Truth Avatar's renderers.")]
+    public List<Renderer> occluders = new List<Renderer>();
+    [Tooltip("Draws the occluders depth-only (Hidden/FasterVoxelPose/DepthOnly). Found by name when empty; referenced here so that a build includes it.")]
+    public Shader depthShader;
+    [Tooltip("A caption on the bubble: who is followed, or why not.")]
+    public bool drawLabel = true;
+    public Color followingColor = new Color(0.25f, 0.9f, 0.4f, 1f);
+    public Color lostColor = new Color(1f, 0.6f, 0.15f, 1f);
+    public Color searchingColor = new Color(0.7f, 0.7f, 0.7f, 1f);
 
     [Header("Measuring (never used to move anything)")]
     [Tooltip("The real operator's rig, to compare the capsule with. Optional.")]
@@ -95,7 +132,7 @@ public sealed class PoseEstimateFollower : MonoBehaviour
     public bool reportOnDisable = true;
     [Tooltip("Print the report to the Console every this many seconds. 0 = never.")]
     [Min(0f)] public float reportEverySeconds = 0f;
-    [Tooltip("One Console line each time the operator is acquired or lost: who was in the last estimate and where the filter expected him. Answers 'why did the capsule stop following?'.")]
+    [Tooltip("One Console line each time the operator is acquired or lost: who was in the last estimate and where the filter expected the operator. Answers 'why did the capsule stop following?'.")]
     public bool logTransitions = true;
     public bool drawGizmos = true;
 
@@ -113,7 +150,7 @@ public sealed class PoseEstimateFollower : MonoBehaviour
     public Vector2 LastMeasurement => track.LastMeasurement;
 
     // Pipeline latency of the estimates (capture -> people in hand), the age of the newest estimate when the object is placed
-    // (adds the wait for the next one), and, with a truth avatar: how far the object is from him, and how far the raw newest estimate is.
+    // (adds the wait for the next one), and, with a truth avatar: how far the object is from the operator, and how far the raw newest estimate is.
     public readonly FvpHistogram PipelineMs = new FvpHistogram(0f, 2000f, 400);
     public readonly FvpHistogram AgeMs = new FvpHistogram(0f, 3000f, 600);
     public readonly FvpHistogram ErrorMetres = new FvpHistogram(0f, 3f, 600);
@@ -189,6 +226,7 @@ public sealed class PoseEstimateFollower : MonoBehaviour
         startedReal = Time.realtimeSinceStartup;
         nextReport = reportEverySeconds > 0f ? startedReal + reportEverySeconds : float.MaxValue;
         ApplyTint(tintWhenNotTracking);      // nothing is followed yet
+        FitBegin();
 
         CacheRenderers();
         hiddenNow = false;
@@ -212,8 +250,10 @@ public sealed class PoseEstimateFollower : MonoBehaviour
         if (srpHooked) { RenderPipelineManager.beginCameraRendering -= OnBeginCamera; RenderPipelineManager.endCameraRendering -= OnEndCamera; srpHooked = false; }
         if (builtinHooked) { Camera.onPreCull -= OnPreCullCamera; Camera.onPostRender -= OnPostRenderCamera; builtinHooked = false; }
         ShowToAllCameras();
+        DestroyDisplay();
         Active.Remove(this);
         ApplyTint(false);
+        FitEnd();
         if (reportOnDisable && estimatesSeen > 0) Debug.Log(BuildReport(), this);
     }
 
@@ -253,6 +293,7 @@ public sealed class PoseEstimateFollower : MonoBehaviour
     public void ResetStatistics()
     {
         PipelineMs.Clear(); AgeMs.Clear(); ErrorMetres.Clear(); RawErrorMetres.Clear();
+        ResetFitStatistics();
         truthFrames = insideFrames = 0;
         secondsSearching = secondsLost = secondsTracking = 0.0;
     }
@@ -274,7 +315,7 @@ public sealed class PoseEstimateFollower : MonoBehaviour
         {
             lastSerial = sample.serial;
             lastCaptureTime = sample.captureTime;
-            OnEstimate(sample);
+            OnEstimate(sample, now);
         }
 
         SyncSettings();
@@ -282,16 +323,19 @@ public sealed class PoseEstimateFollower : MonoBehaviour
         bool justAcquired = state == OperatorTrack.State.Tracking && shown != OperatorTrack.State.Tracking;
         bool justLost = state == OperatorTrack.State.Lost && shown == OperatorTrack.State.Tracking;
         bool wasSearching = shown == OperatorTrack.State.Searching;
+        bool firstLock = justAcquired && !hadTrack;
         shown = state;
 
         Place(state, now, dt, justAcquired && wasSearching);
+        FitStep(state, dt);
         ApplyTint(tintWhenNotTracking && state != OperatorTrack.State.Tracking);
 
         if (justAcquired) { hadTrack = true; trackAcquired.Invoke(); }
-        if (justLost) trackLost.Invoke();
-        if (logTransitions && (justAcquired || justLost)) LogTransition(justAcquired, now);
+        if (justLost) { lostAt = now; trackLost.Invoke(); }
+        if (logTransitions && (justAcquired || justLost)) LogTransition(justAcquired, firstLock, now);
 
         Measure(state, now);
+        UpdateDisplay(state, now);
         if (Time.realtimeSinceStartup >= nextReport)
         {
             nextReport = Time.realtimeSinceStartup + reportEverySeconds;
@@ -305,12 +349,13 @@ public sealed class PoseEstimateFollower : MonoBehaviour
         track.maneuverAccel = maneuverAccel;
         track.maxSpeed = maxSpeed;
         track.holdSeconds = holdSeconds;
+        track.holdIntervals = holdIntervals;
         track.forgetSeconds = forgetSeconds;
         track.acquireRadius = acquireRadius;
         track.confirmEstimates = confirmEstimates;
     }
 
-    void OnEstimate(PoseSample s)
+    void OnEstimate(PoseSample s, double now)
     {
         float real = Time.realtimeSinceStartup;
         if (lastEstimateReal > 0f)
@@ -333,7 +378,8 @@ public sealed class PoseEstimateFollower : MonoBehaviour
             }
 
         SyncSettings();
-        track.Update(cands, s.captureTime, new Vector2(transform.position.x, transform.position.z), claimedFn);
+        bool matched = track.Update(cands, s.captureTime, new Vector2(transform.position.x, transform.position.z), claimedFn, now);
+        if (matched) FitObserve(s);
         if (logTransitions) lastCandidates = Describe(cands, s.people != null ? s.people.Count : 0);
     }
 
@@ -350,13 +396,18 @@ public sealed class PoseEstimateFollower : MonoBehaviour
     }
 
     string lastCandidates = "";
+    double lostAt;      // scene time of the last Tracking -> Lost
 
-    void LogTransition(bool acquired, double now)
+    void LogTransition(bool acquired, bool first, double now)
     {
         Vector2 at = track.PredictXZ(now, maxPredictSeconds);
-        Debug.Log(acquired
-            ? $"[PoseEstimateFollower] '{name}' follows person #{track.LockedId} again (after {track.Staleness(now):F2} s) at ({at.x:F2}, {at.y:F2}); last estimate: {lastCandidates}"
-            : $"[PoseEstimateFollower] '{name}' lost person #{track.LockedId}: nothing matched him for {holdSeconds:F1} s. He was expected at ({at.x:F2}, {at.y:F2}); last estimate had: {lastCandidates}", this);
+        if (acquired && first)
+            Debug.Log($"[PoseEstimateFollower] '{name}' follows person #{track.LockedId} at ({at.x:F2}, {at.y:F2}), {Time.realtimeSinceStartup - startedReal:F1} s after it started looking; last estimate: {lastCandidates}", this);
+        else if (acquired)
+            Debug.Log($"[PoseEstimateFollower] '{name}' follows person #{track.LockedId} again ({now - lostAt:F2} s after it called the operator lost) at ({at.x:F2}, {at.y:F2}); last estimate: {lastCandidates}", this);
+        else
+            Debug.Log($"[PoseEstimateFollower] '{name}' lost person #{track.LockedId}: nothing matched the operator for {track.LostAfterSeconds:F1} s (estimates come every {track.EstimateInterval * 1000.0:F0} ms). " +
+                      $"The operator was expected at ({at.x:F2}, {at.y:F2}); last estimate had: {lastCandidates}", this);
     }
 
     // Where the object should be and how it gets there.
@@ -376,6 +427,7 @@ public sealed class PoseEstimateFollower : MonoBehaviour
             Vector2 p = predictAhead ? track.PredictXZ(now, maxPredictSeconds) : track.Position;
             goal = new Vector3(p.x + offset.x, startY, p.y + offset.y);
         }
+        if (fitReady) goal.y = transform.position.y;      // the height belongs to the fit (FitStep), not to the smoothing
 
         Vector3 pos = transform.position;
         if (snap || !placed || smooth <= 0f) { pos = goal; smoothVel = Vector3.zero; }
@@ -495,6 +547,7 @@ public sealed class PoseEstimateFollower : MonoBehaviour
         if (state != OperatorTrack.State.Searching) RawErrorMetres.Add(Vector2.Distance(track.LastMeasurement, t2));
         truthFrames++;
         if (err <= CapsuleRadius - bodyHalfWidth) insideFrames++;
+        if (truthPeople.Count > 0) MeasureFit(truthPeople[0], state);
     }
 
     // ---------------- the tint ----------------
@@ -547,6 +600,7 @@ public sealed class PoseEstimateFollower : MonoBehaviour
                 bodyHalfWidth, radius, 100.0 * insideFrames / truthFrames, truthFrames, ErrorMetres.Percentile(0.99f) + bodyHalfWidth);
         }
         else sb.Append("  (no truth avatar: nothing to compare the capsule with)\n");
+        AppendFitReport(sb);
         if (total > 0.0) sb.AppendFormat(CultureInfo.InvariantCulture,"  of the session, the capsule knew where the operator was {0:F1} % of the time", 100.0 * secondsTracking / total);
         return sb.ToString();
     }

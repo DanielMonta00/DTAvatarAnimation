@@ -28,7 +28,8 @@ public class FasterVoxelPoseLiteEditor : Editor
             EditorGUILayout.HelpBox(
                 "The lean twin of FasterVoxelPose: the same server and models, none of the displays, history or rewind. It hands the people to " +
                 "PoseEstimateFollower (and any script: People, EstimateReady). While it is enabled it switches the full FasterVoxelPose component off for each " +
-                "Play session (the server answers one client at a time).", MessageType.Info);
+                "Play session (the server answers one client at a time). It draws the skeletons it finds over each camera's display (a light screen " +
+                "overlay, not in the camera images); the transport bar, heatmaps and rewind are the full component's.", MessageType.Info);
         }
 
         DrawDefaultInspector();
@@ -43,6 +44,7 @@ public class FasterVoxelPoseLiteEditor : Editor
                 EditorUtility.SetDirty(t);
             }
             if (GUILayout.Button("Stop server")) FasterVoxelPoseInstaller.StopServer();
+            if (GUILayout.Button(new GUIContent("Stop ALL servers", "Also the servers left running by earlier editor sessions, which 'Stop server' does not reach."))) FasterVoxelPoseLiteInstaller.StopAllServers();
             if (GUILayout.Button("Open log")) FasterVoxelPoseInstaller.OpenLog();
         }
     }

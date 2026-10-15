@@ -361,3 +361,8 @@ Assets/Animations/RecordedAnimations/Bidouille/clip1310fix_fixed.anim
 Assets/Animations/RecordedAnimations/Bidouille/clip1310fix.anim
 Assets/Animations/RecordedAnimations/Bidouille/MostRecentClip.anim
 Assets/Animations/RecordedAnimations/Bidouille/test01_20261001_172733_1310fix.fbx
+Assets/Scripts/FasterVoxelPose/Server~/track_eval/run.ps1
+Assets/Scripts/FasterVoxelPose/Shaders/FvpDepthOnly.shader
+Assets/Scripts/FasterVoxelPose/Shaders/FvpPremultipliedOver.shader
+Assets/Scripts/FasterVoxelPose/Server~/track_eval/run.ps1
+Assets/Scripts/FasterVoxelPose/Server~/track_eval/run.ps1

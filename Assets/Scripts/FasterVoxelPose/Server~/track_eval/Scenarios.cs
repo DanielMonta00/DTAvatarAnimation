@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 
-// Scenarios for OperatorTrack, outside Unity: a person walks, an "estimator" reports him every ~150 ms with noise and latency, and the
+// Scenarios for OperatorTrack, outside Unity: a person walks, an "estimator" reports them every ~150 ms with noise and latency, and the
 // track answers 60 times a second. Everything is compared with where the person really is at that instant.
 static class P
 {
@@ -164,7 +164,7 @@ static class P
             Check("no estimate for 2 s: lost", tr.Current == OperatorTrack.State.Lost, tr.Current.ToString());
             Vector2 held = tr.PredictXZ(tLast + 2.0, 0.6f);
             Check("while lost the prediction holds still (does not run away)", Vector2.Distance(held, tr.PredictXZ(tLast + 9.0, 0.6f)) < 1e-4f, $"{held.x:F2} vs {tr.PredictXZ(tLast + 9.0, 0.6f).x:F2}");
-            // he reappears 0.5 m beyond the held position
+            // the person reappears 0.5 m beyond the held position
             double tBack = tLast + 2.1;
             bool used = tr.Update(new List<OperatorTrack.Candidate> { C(9, new Vector2(held.x + 0.5f, 0)) }, tBack, Vector2.zero, null);
             tr.Tick(tBack);
@@ -244,7 +244,7 @@ static class P
 
         // ------------------------------------------------------------------ J: dropout while a neighbour passes
         {
-            Console.WriteLine("\nJ. the followed person's estimate drops out while another person passes 0.9 m from him");
+            Console.WriteLine("\nJ. the followed person's estimate drops out while another person passes 0.9 m from the followed person");
             var tr = new OperatorTrack { confirmEstimates = 2 };
             double t = 0;
             for (int i = 0; i < 8; i++)
@@ -252,7 +252,7 @@ static class P
                 tr.Update(new List<OperatorTrack.Candidate> { C(1, new Vector2(0, 0)), C(2, new Vector2(3, 0)) }, t, Vector2.zero, null);
                 t += 0.15;
             }
-            Check("following person 1, person 2 seen beside him", tr.Current == OperatorTrack.State.Tracking && tr.LockedId == 1, $"{tr.Current} {tr.LockedId}");
+            Check("following person 1, person 2 seen beside person 1", tr.Current == OperatorTrack.State.Tracking && tr.LockedId == 1, $"{tr.Current} {tr.LockedId}");
             bool taken = false;
             for (int i = 0; i < 6; i++)     // person 1 vanishes; person 2 walks up to 0.9 m from where person 1 stands
             {
@@ -260,12 +260,12 @@ static class P
                 taken |= tr.Update(new List<OperatorTrack.Candidate> { C(2, new Vector2(x, 0)) }, t, Vector2.zero, null);
                 t += 0.15;
             }
-            Check("the neighbour (a known other person) is not taken for him", !taken && tr.LockedId == 1, $"taken {taken}, locked {tr.LockedId}");
+            Check("the neighbour (a known other person) is not taken for the followed person", !taken && tr.LockedId == 1, $"taken {taken}, locked {tr.LockedId}");
         }
 
         // ------------------------------------------------------------------ K: renumbered after a dropout
         {
-            Console.WriteLine("\nK. the estimator loses the person and numbers him again (id 1 -> id 9), at the place he would be");
+            Console.WriteLine("\nK. the estimator loses the person and numbers the person again (id 1 -> id 9), at the place they would be");
             var tr = new OperatorTrack { confirmEstimates = 2 };
             double t = 0;
             for (int i = 0; i < 8; i++) { tr.Update(new List<OperatorTrack.Candidate> { C(1, new Vector2((float)(1.0 * t), 0)) }, t, Vector2.zero, null); t += 0.15; }
@@ -282,7 +282,7 @@ static class P
             double t = 0;
             for (int i = 0; i < 8; i++) { tr.Update(new List<OperatorTrack.Candidate> { C(1, new Vector2(0, 0), 0.01) }, t, Vector2.zero, null); t += 0.15; }
             tr.Update(new List<OperatorTrack.Candidate> { C(1, new Vector2(0.15f, 0)), C(77, new Vector2(0.02f, 0)) }, t, Vector2.zero, null);
-            Check("the ghost does not replace the followed body (he is only 15 cm off)", tr.LockedId == 1, $"locked {tr.LockedId}");
+            Check("the ghost does not replace the followed body (the person is only 15 cm off)", tr.LockedId == 1, $"locked {tr.LockedId}");
         }
 
         // ------------------------------------------------------------------ M: a second, fading skeleton on the same body (seen in the scratch Unity run)
@@ -302,7 +302,7 @@ static class P
             Check("the sharp skeleton represents the body at once (no waiting for the old id to vanish)", tr.LockedId == 52, $"locked {tr.LockedId}");
             bool used = false;
             for (int i = 0; i < 12; i++) { x0 += 0.08f; used = tr.Update(new List<OperatorTrack.Candidate> { P(52, x0, 0f, 0.84f) }, t, Vector2.zero, null); t += 0.067; }
-            Check("and the track follows him on", used && tr.LockedId == 52 && Vector2.Distance(tr.Position, new Vector2(x0, 0f)) < 0.05f, $"{Vector2.Distance(tr.Position, new Vector2(x0, 0f)) * 100:F1} cm off");
+            Check("and the track follows the person on", used && tr.LockedId == 52 && Vector2.Distance(tr.Position, new Vector2(x0, 0f)) < 0.05f, $"{Vector2.Distance(tr.Position, new Vector2(x0, 0f)) * 100:F1} cm off");
         }
 
         // ------------------------------------------------------------------ N: a real neighbour is never merged into the followed body
@@ -313,7 +313,81 @@ static class P
             for (int i = 0; i < 8; i++) { tr.Update(new List<OperatorTrack.Candidate> { C(1, new Vector2(0, 0)), C(2, new Vector2(0.8f, 0)) }, t, Vector2.zero, null); t += 0.1; }
             Check("follows person 1", tr.LockedId == 1, $"{tr.LockedId}");
             bool taken = tr.Update(new List<OperatorTrack.Candidate> { C(2, new Vector2(0.8f, 0)) }, t, Vector2.zero, null);
-            Check("with person 1 missing, person 2 at 0.8 m is not taken for him", !taken && tr.LockedId == 1, $"taken {taken}, locked {tr.LockedId}");
+            Check("with person 1 missing, person 2 at 0.8 m is not taken for person 1", !taken && tr.LockedId == 1, $"taken {taken}, locked {tr.LockedId}");
+        }
+
+        // ------------------------------------------------------------------ O: a loaded GPU (measured in the user's scene: 2 estimates a second, 0.4-1.4 s old when they arrive)
+        {
+            Console.WriteLine("\nO. a slow pipeline (an estimate every 0.5 s, 0.55 s old when it arrives): a person standing there is not 'lost'");
+            var tr = new OperatorTrack { confirmEstimates = 2 };
+            double period = 0.5, latency = 0.55;
+            var est = new List<(double tc, double arr)>();
+            for (double tc = 0.0; tc < 30.0; tc += period) est.Add((tc, tc + latency + 0.03 * rnd.NextDouble()));
+            int next = 0, notTracking = 0, captureRuleLost = 0, frames = 0;
+            for (double now = 0.0; now < 30.0; now += 1.0 / 60.0)
+            {
+                while (next < est.Count && est[next].arr <= now)
+                {
+                    tr.Update(new List<OperatorTrack.Candidate> { C(3, new Vector2(1f, 2f), 0.02) }, est[next].tc, Vector2.zero, null, est[next].arr);
+                    next++;
+                }
+                tr.Tick(now);
+                if (now < 3.0) continue;
+                frames++;
+                if (tr.Current != OperatorTrack.State.Tracking) notTracking++;
+                if (tr.Staleness(now) > tr.holdSeconds) captureRuleLost++;       // what judging from the capture time (the old rule) would have said
+            }
+            Check("never lost", tr.Losses == 0 && notTracking == 0,
+                $"losses {tr.Losses}, {notTracking} of {frames} frames not tracking; judged from the capture time the person would have been 'lost' for {100.0 * captureRuleLost / frames:F0} % of them");
+        }
+
+        {
+            Console.WriteLine("\nO2. the person really goes (estimates keep coming every 0.5 s, none has the person): lost after 2.5 intervals, not before, and forgotten later");
+            var tr = new OperatorTrack { confirmEstimates = 2 };
+            double latency = 0.55, goneAt = 12.0, tLost = double.NaN, tForgot = double.NaN, lastMatchArrival = 0.0;
+            int next = 0;
+            for (double now = 0.0; now < 30.0; now += 1.0 / 60.0)
+            {
+                while (true)
+                {
+                    double tc = next * 0.5, arr = tc + latency;
+                    if (arr > now) break;
+                    var list = new List<OperatorTrack.Candidate>();
+                    if (tc < goneAt) { list.Add(C(3, new Vector2(1f, 2f), 0.02)); lastMatchArrival = arr; }
+                    tr.Update(list, tc, Vector2.zero, null, arr);
+                    next++;
+                }
+                var st = tr.Tick(now);
+                if (st == OperatorTrack.State.Lost && double.IsNaN(tLost)) tLost = now;
+                if (st == OperatorTrack.State.Searching && !double.IsNaN(tLost) && double.IsNaN(tForgot)) tForgot = now;
+            }
+            double after = tLost - lastMatchArrival;
+            Check("lost 2.5 intervals after the last match arrived", after >= tr.holdIntervals * 0.5 - 0.03 && after <= tr.holdIntervals * 0.5 + 0.1,
+                $"{after:F2} s after it (2.5 x 0.5 s = 1.25 s; Hold Seconds alone would be 1.00 s)");
+            double forgot = tForgot - lastMatchArrival;
+            Check("forgotten after Forget Seconds, counted the same way", Math.Abs(forgot - tr.forgetSeconds) < 0.1, $"{forgot:F2} s (forget {tr.forgetSeconds:F1} s)");
+        }
+
+        {
+            Console.WriteLine("\nO3. a fast pipeline keeps the plain Hold Seconds (the interval rule must not slow the detection down)");
+            var tr = new OperatorTrack { confirmEstimates = 2 };
+            double latency = 0.19, goneAt = 6.0, tLost = double.NaN, lastMatchArrival = 0.0;
+            int next = 0;
+            for (double now = 0.0; now < 12.0; now += 1.0 / 60.0)
+            {
+                while (true)
+                {
+                    double tc = next * 0.16, arr = tc + latency;
+                    if (arr > now) break;
+                    var list = new List<OperatorTrack.Candidate>();
+                    if (tc < goneAt) { list.Add(C(3, new Vector2(1f, 2f), 0.02)); lastMatchArrival = arr; }
+                    tr.Update(list, tc, Vector2.zero, null, arr);
+                    next++;
+                }
+                if (tr.Tick(now) == OperatorTrack.State.Lost && double.IsNaN(tLost)) tLost = now;
+            }
+            double after = tLost - lastMatchArrival;
+            Check("lost after Hold Seconds (1.0 s)", Math.Abs(after - tr.holdSeconds) < 0.1, $"{after:F2} s after the last match arrived (interval {tr.EstimateInterval * 1000:F0} ms)");
         }
 
         Console.WriteLine($"\n{(fails == 0 ? "ALL PASSED" : fails + " FAILED")}");

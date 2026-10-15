@@ -94,9 +94,24 @@ public sealed partial class FasterVoxelPoseLite : MonoBehaviour, IPoseSource
     [Tooltip("The server answers one client at a time. On start, switch FasterVoxelPoseLive off for this Play session (the scene is not changed; it is switched back on when this stops).")]
     public bool takeOverFromFullComponent = true;
 
+    [Header("Display (over the camera displays; never in the images the model reads)")]
+    [Tooltip("Draw the people the model found over each camera's display, like FasterVoxelPose does (a screen overlay, redrawn only when an estimate arrives or something moves: it costs the model nothing and is not in the camera images).")]
+    public bool drawSkeletons = true;
+    [Tooltip("Also draw, faint, the skeletons the phantom filter took out.")]
+    public bool drawPhantoms = false;
+    [Tooltip("Pixels at 1920 wide.")]
+    [Range(1f, 6f)] public float skeletonLineWidth = 2f;
+    [Range(1f, 10f)] public float skeletonDotRadius = 4f;
+    [Tooltip("One line in the corner of each display: estimates per second, latency, the server's time, the frame-rate cap Unity is held to.")]
+    public bool drawStatus = true;
+    [Tooltip("The estimate as orange 3D lines in the Scene view (and in the Game view with Gizmos on), next to the green ground-truth skeleton the recorder / FasterVoxelPose gizmos draw from the avatar's own joints.")]
+    public bool drawSceneGizmos = true;
+
     [Header("Server")]
     [Tooltip("Start fvp_server.py when nothing answers on the port. It is the same server as FasterVoxelPose's (the same port): when that one is warm, this finds it ready.")]
     public bool autoLaunchServer = true;
+    [Tooltip("A server left running from before this script was updated does not send the 2D support the phantom filter needs: restart it once (only a server this editor started can be restarted; otherwise the Console says which process to stop).")]
+    public bool restartOutdatedServer = true;
     public string pythonExe = @"C:\ProgramData\miniconda3\envs\fastervoxelpose\python.exe";
     public string fvpRepo = @"C:\Users\vdmontanacuellar\Documents\Daniel\AProjectPTZCameras\Models\Faster-VoxelPose";
     [Tooltip("Empty = Assets/Scripts/FasterVoxelPose/Server~/fvp_server.py.")]
@@ -153,11 +168,19 @@ public sealed partial class FasterVoxelPoseLite : MonoBehaviour, IPoseSource
     public double PoseClockNow => Time.timeAsDouble;
     public string PoseSourceStatus => status;
 
+    public IReadOnlyList<Camera> PoseCameras => cameras;
+
+    // The model reads a calibrated camera's lens-distorted output (so the camera itself is a pose camera), and for a plain camera the image
+    // of a hidden shadow camera: the plain camera that is shown on a display is not one, and keeps showing whatever the twin adds.
     public bool IsPoseCamera(Camera camera)
     {
         if (camera == null) return false;
         if (slots != null)
-            foreach (ViewSlot s in slots) if (s.cam == camera || s.shadow == camera) return true;
+            foreach (ViewSlot s in slots)
+            {
+                if (s.shadow == camera) return true;
+                if (s.cam == camera) return s.Distorted;
+            }
         return cameras != null && cameras.Contains(camera);
     }
 
@@ -294,7 +317,7 @@ public sealed partial class FasterVoxelPoseLite : MonoBehaviour, IPoseSource
         pythonExe = full.pythonExe; fvpRepo = full.fvpRepo; serverScript = full.serverScript; host = full.host; port = full.port;
         startServerWithEditor = full.startServerWithEditor; serverIdleExitSeconds = full.serverIdleExitSeconds;
         stopServerWhenDone = full.stopServerWhenDone; extraServerArgs = full.extraServerArgs; serverPriority = full.serverPriority;
-        autoLaunchServer = full.autoLaunchServer;
+        autoLaunchServer = full.autoLaunchServer; restartOutdatedServer = full.restartOutdatedServer;
     }
 
     static string PathOf(Transform t)
@@ -342,7 +365,9 @@ public sealed partial class FasterVoxelPoseLite : MonoBehaviour, IPoseSource
         tracker.gateMetres = trackGateMetres;
         tracker.Reset(null, 0);
         msPerFrame = 0f; frameTicks = 0; frameCount = 0; windowStart = 0f;
-        governor.Reset(liveFrameRate);
+        governor.Reset(StartingFrameRate());
+        enabledUnscaled = Time.unscaledTime;
+        restartedOutdated = false;
 
         if (takeOverFromFullComponent) TakeOver();
 
@@ -372,6 +397,8 @@ public sealed partial class FasterVoxelPoseLite : MonoBehaviour, IPoseSource
         if (rpHooked) { RenderPipelineManager.endContextRendering -= OnEndContextRendering; rpHooked = false; }
         if (endOfFrameLoop != null) { StopCoroutine(endOfFrameLoop); endOfFrameLoop = null; }
         if (reportOnDisable && estimateCount > 0) Debug.Log(BuildReport(), this);
+        RememberFrameRate();
+        DestroyDisplay();
 
         client?.Dispose();
         client = null;
@@ -457,6 +484,19 @@ public sealed partial class FasterVoxelPoseLite : MonoBehaviour, IPoseSource
         if (linkUp || !autoLaunchServer || serverLaunched || serverError != null) return;
         if (Time.realtimeSinceStartup - enabledAt < 1.5f) return;     // let an already-running (warm) server answer first
 
+        // Something already listens on the port: a server of an earlier editor session, or one that is busy with another client. A second
+        // server next to it would bind the same port without an error and take connections now and then, so never start one beside it.
+        if (!serverLaunched && FvpServerHygiene.PortInUse(port))
+        {
+            if (!portHeldWarned)
+            {
+                portHeldWarned = true;
+                Debug.LogWarning($"[FasterVoxelPoseLite] port {port} is held by another process ({DescribeListeners(port)}) that does not answer yet; not starting a second server next to it. " +
+                                 "If it never answers: Tools > FasterVoxelPose > Stop ALL inference servers, then Play again.", this);
+            }
+            return;
+        }
+
         string script = string.IsNullOrWhiteSpace(serverScript) ? FvpServerProcess.DefaultScriptPath : serverScript;
         if (FvpServerProcess.TryLaunch(pythonExe, script, fvpRepo, host, port, EffectiveIdleExitSeconds, ServerArguments, out string err))
         {
@@ -470,6 +510,84 @@ public sealed partial class FasterVoxelPoseLite : MonoBehaviour, IPoseSource
         }
     }
 
+    bool restartedOutdated, portHeldWarned;
+    float enabledUnscaled;
+
+    // The server said hello. One that predates the 2D support (version 1) answers, but the phantom filter and the stage times do nothing. If this
+    // editor started it, it is restarted once. Otherwise it is a leftover of an earlier editor session, which "Stop inference server" does not
+    // reach (that stops only the server of THIS session): the Console says which process it is and which menu stops it.
+    void OnServerVersion()
+    {
+        if (serverVersion >= FasterVoxelPoseLive.RequiredServerVersion || phantomFilter == FasterVoxelPoseLive.PhantomMode.Off) return;
+
+        List<int> owners = FvpServerHygiene.ListenerPids(port);
+        if (owners.Count > 1)
+        {
+            // Two servers on one port (Windows lets them: both bind with SO_REUSEADDR) and the connections go to either. Which one answered is not
+            // known, so nothing is stopped automatically (the answering one may be the good one).
+            Debug.LogWarning($"[FasterVoxelPoseLite] {owners.Count} processes listen on port {port} ({DescribeListeners(port)}): connections go to either of them, and the one that answered is version {serverVersion}, " +
+                             $"this script needs {FasterVoxelPoseLive.RequiredServerVersion} (phantom filter and stage times are off). Use Tools > FasterVoxelPose > Stop ALL inference servers, then Play again.", this);
+            return;
+        }
+        int mine = FvpServerProcess.Pid(FvpServerProcess.FvpName);
+        bool ours = mine != 0 && owners.Contains(mine);
+        if (ours && restartOutdatedServer && !restartedOutdated)
+        {
+            restartedOutdated = true;
+            Debug.LogWarning($"[FasterVoxelPoseLite] the running server is version {serverVersion}, this script needs {FasterVoxelPoseLive.RequiredServerVersion} (2D support for the phantom filter, stage times): restarting it once.", this);
+            FvpServerProcess.Stop();      // the link drops, ManageServer starts the current one
+            serverLaunched = false; serverError = null;
+            List<int> rest = FvpServerHygiene.ListenerPids(port);
+            if (rest.Count > 0)           // another server holds the port as well, and may be the one that answered: nothing will drop the link
+                Debug.LogWarning($"[FasterVoxelPoseLite] another process still listens on port {port} ({DescribeListeners(port)}), so the link stays on the old server. " +
+                                 "Use Tools > FasterVoxelPose > Stop ALL inference servers, then Play again.", this);
+            return;
+        }
+        if (ours)
+            Debug.LogWarning($"[FasterVoxelPoseLite] the server this editor started (pid {mine}) still says version {serverVersion}, this script needs {FasterVoxelPoseLive.RequiredServerVersion}: " +
+                             "is Server Script an old copy? The phantom filter and the stage times are off.", this);
+        else
+            Debug.LogWarning($"[FasterVoxelPoseLite] the server answering on port {port} ({DescribeListeners(port)}) is version {serverVersion}; this script needs {FasterVoxelPoseLive.RequiredServerVersion}, " +
+                             "so the phantom filter and the stage times are off. It was not started by this editor session (a leftover of an earlier one), which is why 'Stop inference server' does not remove it: " +
+                             "use Tools > FasterVoxelPose > Stop ALL inference servers, then Play again.", this);
+    }
+
+    static string DescribeListeners(int port)
+    {
+        var sb = new StringBuilder();
+        foreach (int pid in FvpServerHygiene.ListenerPids(port))
+        {
+            if (sb.Length > 0) sb.Append(", ");
+            if (pid < 0) { sb.Append("an unknown process"); continue; }
+            try { sb.Append(Process.GetProcessById(pid).ProcessName).Append(" pid ").Append(pid); }
+            catch (Exception) { sb.Append("pid ").Append(pid); }
+        }
+        return sb.Length > 0 ? sb.ToString() : "no process";
+    }
+
+    const string RateKey = "FasterVoxelPoseLite.FrameRate";
+
+    // Where the frame-rate cap starts: the one the last Play ended on, when the governor had lowered it. How heavy the scene is does not
+    // change from one Play to the next, and finding the cap again takes about ten seconds of late estimates every time.
+    int StartingFrameRate()
+    {
+        if (!adaptiveFrameRate || liveFrameRate <= 0) return liveFrameRate;
+        try
+        {
+            int saved = PlayerPrefs.GetInt(RateKey, 0);
+            if (saved > 0) return Mathf.Clamp(saved, Mathf.Min(minFrameRate, liveFrameRate), liveFrameRate);
+        }
+        catch (Exception) { }
+        return liveFrameRate;
+    }
+
+    // The highest cap that was seen to hold (the governor's Settled), not the one it happened to be probing when Play stopped.
+    void RememberFrameRate()
+    {
+        if (!adaptiveFrameRate || liveFrameRate <= 0 || Time.unscaledTime - enabledUnscaled < 20f) return;      // too short a Play to say anything
+        try { PlayerPrefs.SetInt(RateKey, governor.Settled); } catch (Exception) { }
+    }
+
     // ---------------- link ----------------
 
     void PumpClient()
@@ -481,7 +599,7 @@ public sealed partial class FasterVoxelPoseLite : MonoBehaviour, IPoseSource
             switch (m.type)
             {
                 case "link_up":
-                    linkUp = true; linkUpReal = Time.realtimeSinceStartup; helloSeen = false;
+                    linkUp = true; linkUpReal = Time.realtimeSinceStartup; helloSeen = false; portHeldWarned = false;
                     configAcked = false; sentModels = null;
                     break;
                 case "link_down":
@@ -494,9 +612,7 @@ public sealed partial class FasterVoxelPoseLite : MonoBehaviour, IPoseSource
                     serverVersion = (int)m.Num("server_version", 1);
                     serverGpu = m.Str("gpu") ?? "";
                     Debug.Log($"[FasterVoxelPoseLite] server ready on {serverGpu} ({m.Str("device")}), preprocess '{m.Str("preprocess")}', version {serverVersion}.");
-                    if (serverVersion < FasterVoxelPoseLive.RequiredServerVersion && phantomFilter != FasterVoxelPoseLive.PhantomMode.Off)
-                        Debug.LogWarning($"[FasterVoxelPoseLite] the running server is version {serverVersion}: it does not send the 2D support the phantom filter needs, so the filter does nothing. " +
-                                         "Tools > FasterVoxelPose > Stop inference server, then Play again.", this);
+                    OnServerVersion();
                     break;
                 case "config_ok":
                     if ((int)m.Num("config_id") == configId)
@@ -675,6 +791,9 @@ public sealed partial class FasterVoxelPoseLite : MonoBehaviour, IPoseSource
         }
         lastResultReal = e.arrivalReal;
         estimateCount++;
+        if (estimateCount == 1)
+            Debug.Log($"[FasterVoxelPoseLite] first estimate {e.arrivalReal - enabledAt:F1} s after the estimator started (server link after {linkUpReal - enabledAt:F1} s, " +
+                      $"so {e.arrivalReal - linkUpReal:F1} s of set-up, first picture and the model's first answer; an editor's first frames after Play are slow).", this);
         LatencyMs.Add(e.LatencyMs); CaptureMs.Add(e.captureMs); ServerMs.Add(e.totalMs);
         if (e.sendMs > 0f) SendMs.Add(e.sendMs);
 
@@ -806,6 +925,7 @@ public sealed partial class FasterVoxelPoseLite : MonoBehaviour, IPoseSource
                 float waited = Time.realtimeSinceStartup - serverLaunchReal;
                 status = waited < 120f ? $"Starting the server and loading the model... {waited:F0} s" : "The server did not come up - see Logs/fvp_server.log";
             }
+            else if (portHeldWarned) status = $"Port {port} is held by another process that does not answer: Tools > FasterVoxelPose > Stop ALL inference servers.";
             else status = autoLaunchServer ? "Connecting to the server..." : $"Waiting for a server on {host}:{port}...";
         }
         else if (!helloSeen && Time.realtimeSinceStartup - linkUpReal > 3f)

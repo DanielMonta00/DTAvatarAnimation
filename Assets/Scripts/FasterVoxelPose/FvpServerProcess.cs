@@ -69,18 +69,33 @@ public static class FvpServerProcess
 
     public static bool IsRunning => IsRunningOf(FvpName);
     public static bool IsRunningOf(string name) => Find(name) != null;
+    // The process id of the server of this name that this editor session started (0: none).
+    public static int Pid(string name) { Process p = Find(name); return p != null ? p.Id : 0; }
 
     static Process Find(string name)
     {
         int pid = GetPid(name);
         if (pid == 0) return null;
-        try
-        {
-            Process p = Process.GetProcessById(pid);
-            if (!p.HasExited && p.ProcessName.StartsWith("python", StringComparison.OrdinalIgnoreCase)) return p;
-        }
-        catch (ArgumentException) { } // no such process
+        Process p = null;
+        try { p = Process.GetProcessById(pid); }
+        catch (ArgumentException) { }            // no such process
         catch (InvalidOperationException) { }
+        if (p != null)
+        {
+            bool exited = false;
+            try { exited = p.HasExited; } catch (Exception) { }
+            if (!exited)
+            {
+                // For the first ~10 ms of a process's life, asking for its name or exit state throws InvalidOperationException ("has exited or is
+                // inaccessible"; measured in the editor's Mono: 92 of 5,247 polls right after Process.Start). The old code took that for "gone" and
+                // forgot the server: a second IsRunning right after Launch (two editor hooks in the same event) would start another one, and a
+                // server that was forgotten ran on untracked and was never stopped (a leaked server was found after a test run). The name is only
+                // there to catch a recycled process id, so an unreadable one does not count against it.
+                string processName = null;
+                try { processName = p.ProcessName; } catch (Exception) { }
+                if (processName == null || processName.StartsWith("python", StringComparison.OrdinalIgnoreCase)) return p;
+            }
+        }
         SetPid(name, 0);
         return null;
     }

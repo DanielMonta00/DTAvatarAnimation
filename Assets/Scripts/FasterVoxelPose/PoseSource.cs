@@ -23,4 +23,7 @@ public interface IPoseSource
     // Is this camera one whose images go to the model (its own cameras, and the shadow cameras it makes for them)? Anything drawn in
     // the digital twin that a real camera would not see (the protection capsule) has to stay out of those images.
     bool IsPoseCamera(Camera camera);
+    // The cameras the model is fed from, the ones a viewer looks at (not the hidden copies made for them). What was kept out of their
+    // images is drawn over their displays instead (FvpDisplayLayer).
+    IReadOnlyList<Camera> PoseCameras { get; }
 }

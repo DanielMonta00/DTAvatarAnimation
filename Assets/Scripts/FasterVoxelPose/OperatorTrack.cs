@@ -8,13 +8,13 @@ using UnityEngine;
 //
 // What the estimates look like (measured, see the README): the torso point is good to 3-4 cm, but the list of people is not clean. A
 // person can come twice (a second, fading skeleton on the same body, for a few estimates), numbered differently every time the model loses
-// and finds him again, and now and then a skeleton stands where nobody is. So the track follows a BODY, not an id:
+// and finds the person again, and now and then a skeleton stands where nobody is. So the track follows a BODY, not an id:
 //
 //   * skeletons closer than `mergeRadius` are one body (two people cannot stand inside each other); the better one (quality) stands for it;
 //   * the body with the followed id is the person while it is where the prediction says; otherwise a body inside the matching gate
 //     replaces it, but only once the same place has been seen in `confirmEstimates` estimates in a row (a ghost lasts one);
 //   * a body that was seen at least `separation` away from the followed one at the same time is somebody else: it is taken only if it
-//     is practically on the prediction, so a neighbour walking past while the person's estimate drops out is not mistaken for him.
+//     is practically on the prediction, so a neighbour walking past while the person's estimate drops out is not mistaken for the followed person.
 //
 //   Searching  no one yet. The body nearest to `searchCentre` (inside `acquireRadius`, if set; the sharper one on a tie) is taken once it
 //              has been there for `confirmEstimates` estimates. Bodies already followed by another follower (`claimed`) are not candidates.
@@ -31,7 +31,7 @@ public sealed class OperatorTrack
 
     public struct Candidate
     {
-        public int id;           // the estimator's id for this skeleton (stable while that estimator tracks it, new when it loses and finds him)
+        public int id;           // the estimator's id for this skeleton (stable while that estimator tracks it, new when it loses and finds the person again)
         public Vector3 pos;      // world, metres: the point of the body that is followed (the caller chooses it)
         public float quality;    // 0..1, how sure the estimator is of this skeleton (its 2D support, or its score); 0 = not known
     }
@@ -41,7 +41,8 @@ public sealed class OperatorTrack
     public float measurementNoise = 0.06f;      // metres, 1 sigma of one estimate's horizontal position of the followed point (measured on the recorded session: 3-4 cm; set above it)
     public float maneuverAccel = 1.5f;          // m/s^2: how hard the person can speed up, stop or turn (bigger follows changes faster, smooths less)
     public float maxSpeed = 3f;                 // m/s, a person walking never exceeds this; used to cap the velocity
-    public float holdSeconds = 1f;              // Tracking -> Lost when no estimate matched for this long
+    public float holdSeconds = 1f;              // Tracking -> Lost when no estimate matched for this long (counted from the arrival of the last one that did)
+    public float holdIntervals = 2.5f;          // ... and for at least this many intervals between estimates: a slow pipeline is not a lost person
     public float forgetSeconds = 8f;            // Lost -> Searching after this long
     public float acquireRadius = 0f;            // Searching: only people within this of the search centre (<= 0: anyone)
     public int confirmEstimates = 2;            // a new body (searching, or a new one in place of the followed one) must be seen this many estimates in a row
@@ -90,7 +91,19 @@ public sealed class OperatorTrack
     public Vector2 Velocity => new Vector2((float)ax.v, (float)az.v);
     public float Height => height;
 
+    // How old the newest matched estimate's picture is: capture time to now. This is what the position is extrapolated over.
     public double Staleness(double now) => Math.Max(0.0, now - LastMeasurementTime);
+
+    // How long ago the newest matched estimate ARRIVED. This is what decides Lost: the pipeline's own delay (capture -> arrival, 0.2 s on a
+    // free GPU, 0.5-1.4 s measured on a loaded one) is not time the person was missing. Judged from the capture time, a pipeline whose delay
+    // plus interval went over holdSeconds made the follower flicker between Lost and Tracking while the model was seeing the person at every estimate.
+    public double SinceMatchArrived(double now) => Math.Max(0.0, now - lastMatchArrival);
+
+    // The time between two estimates (smoothed), and how long without a match counts as lost.
+    public double EstimateInterval => arrivalInterval;
+    public double LostAfterSeconds => Math.Max(holdSeconds, holdIntervals * arrivalInterval);
+
+    double lastArrival = double.NaN, lastMatchArrival, arrivalInterval, currentArrival;
 
     public void Reset()
     {
@@ -98,6 +111,22 @@ public sealed class OperatorTrack
         LockedId = -1;
         pendingCount = 0; switchCount = 0;
         strangers.Clear();
+        lastArrival = double.NaN; arrivalInterval = 0.0;
+    }
+
+    void NoteArrival(double arrival)
+    {
+        currentArrival = arrival;
+        if (!double.IsNaN(lastArrival))
+        {
+            double gap = arrival - lastArrival;
+            if (gap > 0.0 && gap < 5.0)      // a longer silence is a stream that stopped and restarted, not an interval
+            {
+                gap = Math.Min(gap, 1.5);    // one hiccup must not make the next loss slow to notice
+                arrivalInterval = arrivalInterval <= 0.0 ? gap : arrivalInterval + 0.2 * (gap - arrivalInterval);
+            }
+        }
+        lastArrival = arrival;
     }
 
     void NoteStranger(int id)
@@ -110,9 +139,11 @@ public sealed class OperatorTrack
 
     // The people of an estimate captured at scene time t. Returns whether it gave a measurement of the followed person (in Searching:
     // whether it started one). searchCentre: where to look for someone while nobody is followed (the object's own position).
-    public bool Update(IReadOnlyList<Candidate> candidates, double t, Vector2 searchCentre, Func<int, bool> claimed)
+    // arrival: the scene time the estimate came in (default: t, as if there were no delay); see SinceMatchArrived.
+    public bool Update(IReadOnlyList<Candidate> candidates, double t, Vector2 searchCentre, Func<int, bool> claimed, double arrival = double.NaN)
     {
         if (Current != State.Searching && t < LastMeasurementTime - 1e-3) Reset();    // the clock went back (a rewind): the track means nothing now
+        NoteArrival(double.IsNaN(arrival) ? t : arrival);
         MergeBodies(candidates, claimed);
         return Current == State.Searching ? Search(t, searchCentre) : Associate(t);
     }
@@ -172,6 +203,7 @@ public sealed class OperatorTrack
         height = c.pos.y;
         LockedId = c.id;
         LastMeasurementTime = t;
+        lastMatchArrival = currentArrival;
         LastMeasurement = new Vector2(c.pos.x, c.pos.z);
         Current = State.Tracking;
         pendingCount = 0; switchCount = 0;
@@ -206,7 +238,7 @@ public sealed class OperatorTrack
             float d = Dist(c.pos, expected);
             bool stranger = strangers.Contains(c.id);
             if (d > (stranger ? strangerGate : gate)) continue;
-            float cost = d + switchMargin - qualityWeight * c.quality;      // somebody else has to be this much closer than the followed body to replace him
+            float cost = d + switchMargin - qualityWeight * c.quality;      // somebody else has to be this much closer than the followed body to replace it
             if (cost < bestCost) { bestCost = cost; best = i; bestIsNew = !stranger; }
         }
 
@@ -226,6 +258,7 @@ public sealed class OperatorTrack
 
         LockedId = m.id;
         LastMeasurementTime = t;
+        lastMatchArrival = currentArrival;
         LastMeasurement = new Vector2(m.pos.x, m.pos.z);
         Measurements++;
         if (Current == State.Lost) { Current = State.Tracking; Reacquisitions++; }
@@ -309,12 +342,12 @@ public sealed class OperatorTrack
 
     // ---------------- time passes ----------------
 
-    // Call every frame with the scene time now: Tracking -> Lost -> Searching by the time since the last match.
+    // Call every frame with the scene time now: Tracking -> Lost -> Searching by the time since the last match came in.
     public State Tick(double now)
     {
-        double stale = Staleness(now);
-        if (Current == State.Tracking && stale > holdSeconds) { Current = State.Lost; Losses++; }
-        if (Current == State.Lost && stale > forgetSeconds) Reset();
+        double since = SinceMatchArrived(now);
+        if (Current == State.Tracking && since > LostAfterSeconds) { Current = State.Lost; Losses++; }
+        if (Current == State.Lost && since > forgetSeconds) Reset();
         return Current;
     }
 

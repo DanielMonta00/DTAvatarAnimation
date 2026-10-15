@@ -20,6 +20,7 @@ public sealed class FvpFrameRateGovernor
 
     float ema;
     bool haveEma;
+    int samples;                                   // answers seen since the cap last changed (the first ones after a change are the noisiest)
     double lastChange = double.NegativeInfinity;
     double lastOverload = double.NegativeInfinity;
     int ceiling = int.MaxValue;
@@ -31,12 +32,18 @@ public sealed class FvpFrameRateGovernor
     public int Rate { get; private set; }
     public int Changes { get; private set; }
     public float ServerMs => ema;
+    // The highest cap seen to hold: the server comfortably under its target for ten seconds at it. What to start from next time.
+    public int Settled { get; private set; }
 
     public void Reset(int rate)
     {
-        Rate = rate; ceiling = int.MaxValue; ceilingUntil = double.NegativeInfinity; haveEma = false; ema = 0f;
+        Rate = rate; Settled = rate; ceiling = int.MaxValue; ceilingUntil = double.NegativeInfinity; haveEma = false; ema = 0f; samples = 0;
         lastChange = double.NegativeInfinity; lastOverload = double.NegativeInfinity; Changes = 0; probing = false; failedProbes = 0;
     }
+
+    // How much of the cap to take away: a server at two or three times its target is not helped by one small step (measured: 486 ms at 30 fps,
+    // 56 ms at 15), and each step costs a cooldown during which the estimates are late.
+    float DropFactor(float serverMs) => serverMs > 2.5f * targetServerMs ? 0.55f : serverMs > 1.6f * targetServerMs ? 0.7f : 0.8f;
 
     // One call per answer of the server (its own total time, ms) at `now` seconds; returns the cap to hold.
     public int Observe(float serverMs, double now)
@@ -44,23 +51,26 @@ public sealed class FvpFrameRateGovernor
         if (Rate <= 0) return Rate;
         ema = haveEma ? ema + 0.3f * (serverMs - ema) : serverMs;
         haveEma = true;
+        samples++;
         int top = now < ceilingUntil ? Math.Min(maxRate, ceiling) : maxRate;
-        if (Rate > top) { Rate = Math.Max(minRate, top); Changes++; lastChange = now; }
+        if (Rate > top) { Rate = Math.Max(minRate, top); Changes++; lastChange = now; samples = 0; Settled = Math.Min(Settled, Rate); }
+        if (ema <= targetServerMs && samples >= 10 && now - lastChange >= 10.0) Settled = Rate;      // it has held, this is a cap to remember
 
         if (ema > targetServerMs)
         {
             lastOverload = now;
-            if (Rate > minRate && now - lastChange >= lowerCooldownSeconds)
+            if (Rate > minRate && samples >= 3 && now - lastChange >= lowerCooldownSeconds)      // not on a single (cold-start) answer
             {
                 // a try that failed soon after it began doubles the wait; a new overload at a cap that had held does not
                 failedProbes = probing && now - probeStart < ProbeVerdictSeconds ? Math.Min(failedProbes + 1, 4) : 0;
                 probing = false;
                 ceiling = Rate - 1;                        // the cap that was too much
                 ceilingUntil = now + ceilingHoldSeconds * (1 << failedProbes);
-                int lower = Math.Max(minRate, (int)Math.Floor(Rate * 0.8));
+                int lower = Math.Max(minRate, (int)Math.Floor(Rate * DropFactor(ema)));
                 if (lower == Rate) lower = Math.Max(minRate, Rate - 1);
                 Rate = lower; Changes++; lastChange = now;
-                haveEma = false;                           // the old answers belong to the old cap
+                Settled = Math.Min(Settled, Rate);         // nothing above this one has held
+                haveEma = false; samples = 0;              // the old answers belong to the old cap
             }
         }
         else if (ema < 0.6f * targetServerMs && Rate < maxRate && now - lastChange >= raiseAfterSeconds && now - lastOverload >= raiseAfterSeconds)
@@ -71,7 +81,7 @@ public sealed class FvpFrameRateGovernor
             {
                 Rate = higher; Changes++; lastChange = now;
                 probing = true; probeStart = now;
-                haveEma = false;
+                haveEma = false; samples = 0;
             }
         }
         return Rate;

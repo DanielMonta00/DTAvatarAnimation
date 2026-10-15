@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 // FasterVoxelPose as a source of poses for whatever reacts to people (see PoseSource.cs): the estimate on show while the scene runs.
@@ -7,6 +8,7 @@ public partial class FasterVoxelPoseLive : IPoseSource
     public bool PoseSourceRunning => IsRunning && IsReady;
     public double PoseClockNow => SceneNow;
     public string PoseSourceStatus => status;
+    public IReadOnlyList<Camera> PoseCameras => cameras;
 
     public bool IsPoseCamera(Camera camera)
     {

@@ -3,12 +3,13 @@
 #
 #   .\run.ps1 -What scenarios              synthetic walkers, ghosts, duplicates, dropouts, crossings, a clock that goes back: pass / fail
 #   .\run.ps1 -What governor               the frame-rate governor against a simulated GPU with the measured cliff: pass / fail
+#   .\run.ps1 -What fit                    the capsule's size (FvpCapsuleFit): hand-made and random poses, is the body inside at every frame: pass / fail
 #   .\run.ps1 -What replay -Csv x.csv      the REAL estimates of a recorded session through the tracker with a pipeline delay put in:
 #                                          capsule error against the person's real torso point, for estimate rates x delays.
 #                                          x.csv comes from:  python ..\capsule_eval.py --spawn --views 1,2,3,4 --frames 0:608:1 --csv x.csv
 #                                          Options: -Noise (the tracker's measurement noise, m) -Accel (its maneuver acceleration, m/s^2)
 param(
-    [ValidateSet('scenarios', 'governor', 'replay')][string]$What = 'scenarios',
+    [ValidateSet('scenarios', 'governor', 'fit', 'replay')][string]$What = 'scenarios',
     [string]$Csv = '',
     [double]$Noise = 0.06,
     [double]$Accel = 1.5,
@@ -18,6 +19,7 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $scripts = (Resolve-Path (Join-Path $here "..\..\..")).Path          # Assets/Scripts
 $track = Join-Path $scripts "FasterVoxelPose\OperatorTrack.cs"
 $governor = Join-Path $scripts "FasterVoxelPose\FvpFrameRateGovernor.cs"
+$fit = Join-Path $scripts "FasterVoxelPose\FvpCapsuleFit.cs"
 $runtime = Get-ChildItem "$UnityData\NetCoreRuntime\shared\Microsoft.NETCore.App" | Sort-Object Name | Select-Object -Last 1
 $refs = Get-ChildItem "$($runtime.FullName)\*.dll" | Where-Object { $_.Name -match '^(System|Microsoft\.Win32|mscorlib|netstandard)' -and $_.Name -notmatch 'Native' } | ForEach-Object { '-r:"' + $_.FullName + '"' }
 $core = "$UnityData\Managed\UnityEngine\UnityEngine.CoreModule.dll"          # Vector2 / Vector3 / Mathf: plain managed math
@@ -29,6 +31,7 @@ Set-Content "$out\refs.rsp" $refs -Encoding ascii
 switch ($What) {
     'scenarios' { $sources = @("$here\Scenarios.cs", $track); $args2 = @() }
     'governor'  { $sources = @("$here\GovernorSim.cs", $governor); $args2 = @() }
+    'fit'       { $sources = @("$here\FitSim.cs", $fit); $args2 = @() }
     'replay' {
         if (-not $Csv) { throw "-Csv is required for -What replay (python ..\capsule_eval.py --spawn --csv x.csv)" }
         $sources = @("$here\Replay.cs", $track)

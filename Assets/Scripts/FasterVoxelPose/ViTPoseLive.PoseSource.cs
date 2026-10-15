@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 // ViTPose (its people lifted to 3D by triangulation) as a source of poses for whatever reacts to people (see PoseSource.cs).
@@ -7,6 +9,7 @@ public sealed partial class ViTPoseLive : IPoseSource
     public bool PoseSourceRunning => IsRunning && linkUp && host_ != null && lift3D;
     public double PoseClockNow => host_ != null ? host_.SceneNow : Time.timeAsDouble;
     public string PoseSourceStatus => host_ == null ? "no FasterVoxelPose to take the camera frames from" : status;
+    public IReadOnlyList<Camera> PoseCameras => host_ != null ? host_.PoseCameras : Array.Empty<Camera>();
 
     // ViTPose reads the frames FasterVoxelPose captures: those are its cameras.
     public bool IsPoseCamera(Camera camera) => host_ != null && host_.IsPoseCamera(camera);

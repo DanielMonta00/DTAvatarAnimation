@@ -4,6 +4,8 @@ using System.Linq;
 
 // The frame-rate governor against a simulated GPU: server time as a function of Unity's cap, with the cliff that was measured
 // (15 fps: 56 ms, 20 fps: 90, 30 fps: 486 under a heavy scene), plus noise, and a scene load that changes during the run.
+static class Ext { public static T Also<T>(this T x, Action<T> f) { f(x); return x; } }
+
 static class G
 {
     static int fails;
@@ -21,21 +23,23 @@ static class G
     }
     static float Light(int rate) => 40f + rate * 0.3f;
 
-    static (List<float> ms, List<int> rates, int changes) Run(Func<double, int, float> plant, double seconds, int start = 30)
+    static (List<float> ms, List<int> rates, int changes) Run(Func<double, int, float> plant, double seconds, int start = 30) => Run2(plant, seconds, start, start).r;
+
+    static ((List<float> ms, List<int> rates, int changes) r, List<double> times, int settled) Run2(Func<double, int, float> plant, double seconds, int max, int initial)
     {
-        var g = new FvpFrameRateGovernor { maxRate = start, minRate = 12 };
-        g.Reset(start);
-        var ms = new List<float>(); var rates = new List<int>();
-        int rate = start;
+        var g = new FvpFrameRateGovernor { maxRate = max, minRate = 12 };
+        g.Reset(initial);
+        var ms = new List<float>(); var rates = new List<int>(); var times = new List<double>();
+        int rate = initial;
         for (double t = 0; t < seconds; t += 0.12)       // an answer every 120 ms at best
         {
             float s = plant(t, rate) * (0.9f + 0.2f * (float)rnd.NextDouble());
             // the server cannot answer faster than it computes: fewer answers when it is slow
             rate = g.Observe(s, t);
-            ms.Add(s); rates.Add(rate);
+            ms.Add(s); rates.Add(rate); times.Add(t);
             t += Math.Max(0.0, s / 1000.0 - 0.12);
         }
-        return (ms, rates, g.Changes);
+        return ((ms, rates, g.Changes), times, g.Settled);
     }
 
     static void Main()
@@ -66,6 +70,23 @@ static class G
         var d = Run((t, r) => (t > 60 && t < 80) ? Heavy(r) : Light(r), 300);
         var dEnd = d.rates.Skip(d.rates.Count * 8 / 10).ToList();
         Check("it is back at 30 by the end", dEnd.All(r => r == 30), $"{dEnd.Min()}..{dEnd.Max()} (changes {d.changes})");
+
+        Console.WriteLine("\nE. how fast it finds the cap from a heavy start (the first seconds are late estimates)");
+        var e = Run2((t, r) => Heavy(r), 120, 30, 30);
+        int firstGood = e.r.rates.FindIndex(r => r <= 21);
+        double tGood = firstGood >= 0 ? e.times[firstGood] : double.NaN;
+        Console.WriteLine($"     first answers (ms): {string.Join(" ", e.r.ms.Take(12).Select(x => x.ToString("F0")))}; rates: {string.Join(" ", e.r.rates.Take(12))}");
+        Check("it is at a good cap (<= 21 fps) within 3 s", tGood < 3.0, $"{tGood:F1} s");
+        Check("one cold-start answer alone does not lower the cap", new FvpFrameRateGovernor { maxRate = 30, minRate = 12 }.Also(g => { g.Reset(30); g.Observe(900f, 0.0); }).Rate == 30, "one answer of 900 ms: cap unchanged");
+
+        Console.WriteLine("\nF. the next Play starts where this one settled");
+        var f1 = Run2((t, r) => Heavy(r), 300, 30, 30);
+        var f2 = Run2((t, r) => Heavy(r), 120, 30, f1.settled);
+        Console.WriteLine($"     first run settled at {f1.settled} fps; the next starts there and makes {f2.r.changes} change(s), server mean {f2.r.ms.Average():F0} ms");
+        Check("the settled cap is in the good range (12..21)", f1.settled >= 12 && f1.settled <= 21, $"{f1.settled}");
+        Check("starting from it, there is nothing to find again", f2.r.changes == 0 && f2.r.ms.Count(x => x > 150) < f2.r.ms.Count * 0.02, $"{f2.r.changes} changes, {100.0 * f2.r.ms.Count(x => x > 150) / f2.r.ms.Count:F1} % over 150 ms");
+        var f3 = Run2((t, r) => Light(r), 200, 30, f1.settled);
+        Check("and if the scene got lighter it climbs back to 30", f3.r.rates.Skip(f3.r.rates.Count * 9 / 10).All(r => r == 30), $"{f3.r.rates.Last()} at the end");
 
         Console.WriteLine($"\n{(fails == 0 ? "ALL PASSED" : fails + " FAILED")}");
         Environment.Exit(fails == 0 ? 0 : 1);
